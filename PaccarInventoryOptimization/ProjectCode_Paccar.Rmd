@@ -1,0 +1,520 @@
+---
+title: "Paccar Supply Chain Project"
+author: "Andrea Hellebust, Han Li, Hannah Khuong, Keith Castelino, Mark Russeff, Ying Xue"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+```{r message = FALSE, result = FALSE, echo = FALSE, warning=FALSE}
+# Clear environment of variables and functions
+rm(list = ls(all = TRUE)) 
+
+# Clear environmet of packages
+if(is.null(sessionInfo()$otherPkgs) == FALSE)lapply(paste("package:", names(sessionInfo()$otherPkgs), sep=""), detach, character.only = TRUE, unload = TRUE)
+```
+
+# Load packages
+
+```{r message = FALSE}
+if (!require("lubridate")) install.packages("lubridate")
+if (!require("Hmisc")) install.packages("Hmisc")
+if (!require("SCperf")) install.packages("SCperf")
+if (!require("naniar")) install.packages("naniar")
+if (!require("data.table")) install.packages("data.table")
+
+library(lubridate)
+library(Hmisc)
+library(readr)
+library(tidyverse)
+library(SCperf)
+library(naniar)
+library(data.table)
+```
+
+# Load data
+
+```{r message = FALSE, warning=FALSE}
+demand <- read_csv("demand.csv")
+demand_annual <- read_csv("annual_demand.csv")
+fcst_error <- read_csv("fcst_error.csv")
+fcst <- read_csv("future_fcst.csv")
+lead_time <- read_csv("lead_time.csv")
+location <- read_csv("item_location_count.csv")
+ots <- read_csv("ots.csv")
+parts <- read_csv("part_information.csv")
+protected <- read_csv("protected_inventory.csv")
+```
+
+# Data Preprocessing 
+
+## Clean data
+
+```{r}
+# clean demand data
+demand <- demand %>% 
+  mutate(rhit_cost = 15*rhit) %>% 
+  filter(rline!=0 | order_month < '2019-07-01')  #Only using regionally stocking order lines.
+
+# clean parts data
+parts <- parts %>% 
+  mutate(storage_volume = ((length * width * height) / 1728),
+         storage_cost = (storage_volume * 5.5)) %>% 
+  mutate(fcst_monthly = fcst_3m / 3) %>% 
+  select(dim, velocity, part_cost, item_desc, stock_class, marketing_category, on_hand, 
+         on_order, lead_time, fcst_monthly, safety_stock_qty, days_on_hand, storage_volume, storage_cost) 
+
+# clean OTS data (to evaluate poor vendors)
+ots <- ots %>% 
+  mutate(late_perc = (pd_shipped + past_due) / total_all) %>% 
+  select(ots_month, vndr_id, late_perc, total_all)
+
+# clean protected items data -- create 'dim' for joining
+protected <- protected %>% 
+  mutate(dim = paste(item_id, "LAN", sep = "")) %>% 
+  select(dim, protected_ind)
+
+```
+
+## Join data
+
+```{r}
+dat <- demand %>% 
+  left_join(parts, by = "dim") %>% 
+  left_join(protected, by = "dim") 
+dat$protected_ind = ifelse(is.na(dat$protected_ind), 0, 1)
+``` 
+
+# Data Insights
+
+## EDA
+
+### Part info
+
+* 496k parts info
+* 149,241 item description
+* 814 stock class
+* 803 stock class description
+* 65 mkt category
+
+```{r}
+describe(parts)
+```
+```{r fig.width= 10}
+#Numeric Var Distribution
+parts %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_histogram(bins = 60)
+```
+
+
+### Demand 
+
+Division: B K P
+
+```{r}
+describe(demand)
+```
+
+```{r fig.width=10}
+#Numeric Var Distribution
+demand %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_histogram(bins = 60)
+```
+
+### Annual demand 
+
+```{r}
+describe(demand_annual)
+```
+
+### Forecast Error
+
+```{r}
+describe(fcst_error)
+```
+
+## General Overview
+
+```{r}
+revised_parts <- parts %>% 
+  mutate(storage_cost_total = storage_cost * on_hand)
+
+revised_demand <- demand %>% 
+  filter(between(order_month, as.Date('2018-07-01'), as.Date('2019-06-30')))
+
+cur_on_hand <- sum(revised_parts$on_hand)
+cur_demand_qty <- sum(revised_demand$demand_qty)
+cur_rhit_rate <- sum(revised_demand$rhit) / sum(revised_demand$rline)
+cur_rhit_cost <- sum(revised_demand$rhit) * 15
+cur_storage_vol <- sum(revised_parts$storage_volume)
+cur_storage_cost <- sum(revised_parts$storage_volume) * 5.5
+cur_days_on_hand <- mean(revised_parts$days_on_hand)
+cur_lead_time <- mean(revised_parts$lead_time)
+cur_order_gt_fcst_perc <- sum(revised_parts$on_order) / sum(revised_parts$fcst_monthly) - 1
+cur_overforecasting <- sum(fcst_error$fcst_total) / sum(fcst_error$total_history) - 1
+
+cur_on_hand # On Hand
+cur_demand_qty # Demand Qty
+cur_rhit_rate # Avg Rhit Rate
+cur_rhit_cost # Rhit Cost
+cur_storage_vol # Storage Volume
+cur_storage_cost # Storage Cost
+cur_days_on_hand # Avg Days on Hand
+cur_lead_time # Avg Lead Time
+cur_order_gt_fcst_perc # Order Exceed Forecast Percentage
+cur_overforecasting # Overforecasting Rate
+```
+
+## Analyze by velocity
+
+```{r}
+annual <- dat %>%
+  group_by(dim) %>% 
+  summarise(demand_qty_sum = sum(demand_qty))
+
+velocity <- dat %>% 
+  separate(order_month, c("y", "m", "d")) %>% 
+  select(dim, m, y, velocity, part_cost) %>% 
+  filter(y == 2018) %>% 
+  left_join(annual, by = "dim") %>% 
+  mutate(revenue = part_cost * demand_qty_sum) %>% 
+  group_by(velocity) %>% 
+  summarise(revenue = sum(revenue, na.rm = TRUE),
+            count = n())
+
+
+```
+
+## Analyze inventory space and dead stock
+
+```{r}
+#Inventory space
+inventory_space <- sum(parts$on_hand * parts$storage_cost) / 5.5
+
+paste('Total space of on hand stock:',inventory_space)
+
+#Inventory cost
+inventory_cost <- sum(parts$on_hand * parts$storage_cost) 
+
+paste('Total cost of on hand stock:',inventory_cost)
+
+#Dim with demand in past two years
+
+demand_last2years <- demand %>% filter(order_month < '2019-07-01'& order_month > '2017-07-01') %>% group_by(dim) %>% summarise(total_demand = sum(demand_qty)) 
+
+#Filter dim with no demand in past two years in parts table
+deadstock<- parts %>% filter(dim %nin% demand_last2years$dim )
+
+#Calculate deadstock_cost, deadstock_space, and percent_save
+deadstock_cost <-sum(deadstock$on_hand*deadstock$storage_cost)
+
+paste('Total cost of deadstock:',deadstock_cost )
+
+deadstock_space <-sum(deadstock$on_hand*deadstock$storage_cost/5.5)
+
+paste('Total space of deadstock:',deadstock_space )
+
+percent_save <- deadstock_space / inventory_space
+
+paste('Percert saved if we remove deadstock:',percent_save)
+
+```
+
+# Analyze over-ordering
+
+```{r}
+dat1 <- dat
+
+dat1<-dat1 %>% left_join(fcst_error, by = c("dim", "order_month" = "fcst_error_month"))
+dat1<-dat1 %>% group_by(dim, order_month) %>% mutate(avg_demand_qty =  mean(demand_qty))
+dat1 <-dat1 %>% select(dim, order_month, demand_qty, on_hand, on_order, fcst_monthly, storage_cost, storage_volume, velocity, fcst_total, total_history)
+dat1<-dat1[dat1$order_month >= "2018-01-01" & dat1$order_month <= "2019-06-30",]
+dat1 <- dat1 %>% group_by(dim) %>% mutate(avg_demand_qty =  mean(demand_qty)) %>% distinct(dim, .keep_all = TRUE)
+
+
+dat1 <- dat1 %>% 
+  mutate(over_fcst = fcst_total - total_history, 
+         over_order = on_order - fcst_monthly) %>% 
+  select(dim, demand_qty, on_hand, over_fcst, over_order, storage_cost, storage_volume, on_order, velocity, total_history, fcst_total, fcst_monthly) %>%  
+  mutate(savings = storage_cost * (over_order +over_fcst)) %>% 
+  mutate(space_saved = storage_volume * (over_order +over_fcst) )
+
+
+dat1 %>% filter(velocity %in% c(1, 2, 3, 9)) %>% group_by(velocity) %>% summarize(over_order_rate = sum(over_order)/sum(fcst_monthly)*100) %>% ggplot(aes(velocity, over_order_rate))+geom_bar(stat='identity')
+
+dat1 %>%  filter(velocity %in% c(1, 2, 3, 9)) %>% group_by(velocity) %>%summarize(over_fcst_rate = sum(na.omit(over_fcst)) / sum(na.omit(total_history))*100) %>% ggplot(aes(velocity, over_fcst_rate))+geom_bar(stat='identity')
+
+
+```
+
+
+# Modelling
+
+## EOQ
+
+```{r}
+#Variable for number of months in our demand data
+num_years <- length(unique(demand$order_month)) / 12
+
+#Creating a table of averages for each dim.
+demand_average <-  demand %>%
+  group_by(dim) %>%
+  summarise(demand_avg = sum(demand_qty) / num_years,
+            rline_avg = sum(rline) / num_years,
+            rhit_avg = sum(rhit) / num_years,
+            rhit_qty_avg = sum(rhit_qty) / num_years,
+            rhit_cost_avg = (sum(rhit_cost) / sum(rhit_qty)) / num_years) 
+
+#Dataframe prepped to receive model data
+model_dat <- parts %>%
+  left_join(demand_average, by = "dim")
+```
+
+```{r, warning=FALSE}
+
+#Create data in proper form for EOQ model
+#rhit_cost_avg is mutated to 0.0000001 instead of 0 due to bug in package.
+eoq <- model_dat %>%
+  mutate(rhit_cost_avg = if_else(is.na(rhit_cost_avg) | rhit_cost_avg == 0, 0.0000001, rhit_cost_avg)) %>%
+  mutate(demand_avg = demand_avg - safety_stock_qty) %>%  #Subtracted safety stock from demand bc EOQ assumes 0 ss.
+  select(demand_avg,  part_cost, storage_cost, rline_avg, rhit_avg, rhit_qty_avg, rhit_cost_avg)
+
+#Model value for optimized order quantity.
+model_dat$q <- round(EOQ(eoq['demand_avg'], eoq['part_cost'], eoq['storage_cost'], eoq['rhit_cost_avg'])[[1]], 2)
+
+#Model value for optimized cycle length.
+model_dat$cycle_length <- round(EOQ(eoq['demand_avg'], eoq['part_cost'], eoq['storage_cost'], eoq['rhit_cost_avg'])[[2]], 2)
+
+#Model value for maximum allowable rhit quantity.
+model_dat$max_rhit_qty <- round(EOQ(eoq['demand_avg'], eoq['part_cost'], eoq['storage_cost'], eoq['rhit_cost_avg'])[[3]], 2)
+
+#Model value for optimized total variable cost for each part.
+model_dat$tvc <- round(EOQ(eoq['demand_avg'], eoq['part_cost'], eoq['storage_cost'], eoq['rhit_cost_avg'])[[4]], 2)
+
+#Filter any tvc of 0 or NA and rline NA
+model_dat <- model_dat %>% mutate(tvc = (if_else(is.na(tvc), 0, tvc))) %>% 
+  filter(!is.na(rline_avg) | !is.na(rhit_avg) | !is.na(max_rhit_qty) | !is.na(rhit_qty_avg))
+
+#For display filter out any part with no or extremely low yearly variable cost.
+model_dat  
+
+
+
+```
+
+```{r}
+#Total variable cost for current inventory.
+tvc_current <- (model_dat$rhit_avg * 15) + (model_dat$on_hand * model_dat$storage_cost) - (model_dat$safety_stock_qty * model_dat$storage_cost)
+
+paste("TVC for current inventory:", paste('$',formatC(round(sum(tvc_current), 2), big.mark=',', format = 'f')))
+
+#Total variable cost for EOQ model.
+paste("TVC for EOQ model:", paste('$',formatC(round(sum(model_dat$tvc), 2), big.mark=',', format = 'f')))
+```
+
+The EOQ performs better at minimizing variable costs than the current method.  
+* Using the EOQ model Paccar could save roughly $352,144.35 per year.  
+* It is world noting that the TVC of the current inventory is calculated under the assumption that the current state of the inventory is an accurate representation of yearly dynamic state of the inventory. 
+* Even if state of of the current inventory were to fluctuate by 20% the EOQ would still outperform.  
+* When implimenting the EOQ model it is important to purge the deadstock beforehand.
+
+```{r}
+#Filter our 0 quantities.
+model_dat <- model_dat %>% 
+  filter(rline_avg > 0 & max_rhit_qty > 0 & rhit_qty_avg > 0 )
+
+#Calculate the average rfill rate for the EOQ model.
+fill_rate_eoq <- 1- sum(ifelse(model_dat$rhit_qty_avg > model_dat$max_rhit_qty, 1, (ifelse(model_dat$rline_avg < (model_dat$max_rhit_qty/model_dat$rhit_avg), model_dat$rline_avg, model_dat$max_rhit_qty/model_dat$rhit_qty_avg)))) / sum(model_dat$rline_avg)
+
+#Calculate the average rfill rate for the given time period with current ordering strategy.
+fill_rate <- 1- (sum(model_dat$rhit_avg) / sum(model_dat$rline_avg))
+
+paste("Current average yearly fill rate for time period given:", paste(round(fill_rate, 4) * 100, '%'))
+
+paste("Average yearly fill rate for EOQ model:",  paste(round(fill_rate_eoq, 4) * 100, '%'))                  
+        
+```
+Average yearly fill rate will decrease using the EOQ optimization.
+  * This decrease could be mitigated by moving the inventory to a warehouse with lower storage costs.
+
+## EOQ with optimized safety stock
+
+```{r, warning=FALSE}
+#Create a data frame for more accurate standard deviation.      
+x <- demand %>%
+  expand(dim, order_month) %>%
+  left_join(demand) %>%
+  group_by(dim, order_month) %>%
+  summarise(month_demand = sum(demand_qty)) %>%
+  group_by(dim) %>%
+  mutate(month_demand = ifelse(is.na(month_demand), 0.0, month_demand)) %>%
+  summarize(demand_mean = sum(month_demand) / num_years,
+            demand_sd = sd(month_demand) * sqrt(12))
+
+rhit_cost_mean <-  demand %>%
+  group_by(dim) %>%
+  summarise(rhit_avg = sum(rhit) / num_years,
+            rhit_cost_mean = (sum(rhit_cost) / sum(rhit_qty)) / num_years) 
+
+#Dataframe prepped to receive model data
+model_dat2 <- parts %>%
+  left_join(x, by = "dim") %>%
+  left_join(rhit_cost_mean, by = "dim") %>%
+  mutate(lead_time = lead_time /365) 
+
+#Create new optimized safety stock with a 0.96 service level
+model_dat2$ss_opt <- SS(0.84, model_dat2['demand_sd'], model_dat2['lead_time'])[[1]]
+
+
+#Create data in proper form for EOQ model
+#rhit_cost_avg is mutated to 0.0000001 instead of 0 due to bug in package.
+eoq_ss <- model_dat2 %>%
+  mutate(rhit_cost_mean = ifelse(is.na(rhit_cost_mean) | rhit_cost_mean == 0, 0.0000001, rhit_cost_mean)) %>%
+  mutate(demand_mean = demand_mean - ss_opt) %>%  #Subtracted safety stock from demand bc EOQ assumes 0 ss.
+  select(demand_mean,  part_cost, storage_cost, rhit_cost_mean)
+
+#Model value for optimized order quantity.
+model_dat2$q_ss <- round(EOQ(eoq_ss['demand_mean'], eoq_ss['part_cost'], eoq_ss['storage_cost'], eoq_ss['rhit_cost_mean'])[[1]], 2)
+
+#Model value for optimized cycle length.
+model_dat2$cycle_length_ss <- round(EOQ(eoq_ss['demand_mean'], eoq_ss['part_cost'], eoq_ss['storage_cost'], eoq_ss['rhit_cost_mean'])[[2]], 2)
+
+#Model value for maximum allowable rhit quantity.
+model_dat2$max_rhit_qty_ss <- round(EOQ(eoq_ss['demand_mean'], eoq_ss['part_cost'], eoq_ss['storage_cost'], eoq_ss['rhit_cost_mean'])[[3]], 2)
+
+#Model value for optimized total variable cost for each part.
+model_dat2$tvc_ss <- round(EOQ(eoq_ss['demand_mean'], eoq_ss['part_cost'], eoq_ss['storage_cost'], eoq_ss['rhit_cost_mean'])[[4]], 2)
+
+#Filter any tvc of 0 or NA.
+model_dat2 <- model_dat2 %>% filter(tvc_ss > 0)
+
+#For display filter out any part with no or extremely low yearly variable cost.
+model_dat2  %>% filter(tvc_ss > 0.5)
+
+```
+```{r}
+#Total variable cost for EOQ model with optimized safety stock.
+paste("TVC for EOQ model with optimized SS:", paste('$',formatC(round(sum(model_dat2$tvc_ss)), big.mark=',', format = 'f')))
+
+#Total fixed cost for safety stock currently
+paste("Total safety stock storage cost:", sum(model_dat2$safety_stock_qty * model_dat2$storage_cost))
+
+#Total fixed cost for safety stock post optimization
+paste("Total optimized safety stock storage cost:", sum(model_dat2$ss_opt * model_dat2$storage_cost))
+```
+
+Based on these observations we can see that it is likely that Paccar is using the standard formula for safety stock quantity.  
+* Formula = Service Factor * standard deviation Lead_Time * average Demand  
+* Because these numbers are so close we can estimate that safety stock is already quite well optimized.  
+* If the service level is rasied the total storage cost of the safety stock raises dramatically, while the TVC only decreases slightly.  
+
+## EOQ model with no safety stock
+
+```{r, warning=FALSE}
+#Dataframe prepped to receive model data
+model_dat3 <- parts %>%
+  left_join(demand_average, by = "dim")
+
+#Create data in proper form for EOQ model
+#rhit_cost_avg is mutated to 0.0000001 instead of 0 due to bug in package.
+eoq_ns <- model_dat3 %>%
+  mutate(rhit_cost_avg = if_else(is.na(rhit_cost_avg) | rhit_cost_avg == 0, 0.0000001, rhit_cost_avg)) %>%
+  select(demand_avg,  part_cost, storage_cost, rhit_cost_avg)
+
+#Model value for optimized order quantity.
+model_dat3$q <- round(EOQ(eoq_ns['demand_avg'], eoq_ns['part_cost'], eoq_ns['storage_cost'], eoq_ns['rhit_cost_avg'])[[1]], 2)
+
+#Model value for optimized cycle length.
+model_dat3$cycle_length <- round(EOQ(eoq_ns['demand_avg'], eoq_ns['part_cost'], eoq_ns['storage_cost'], eoq_ns['rhit_cost_avg'])[[2]], 2)
+
+#Model value for maximum allowable rhit quantity.
+model_dat3$max_rhit_qty <- round(EOQ(eoq_ns['demand_avg'], eoq_ns['part_cost'], eoq_ns['storage_cost'], eoq_ns['rhit_cost_avg'])[[3]], 2)
+
+#Model value for optimized total variable cost for each part.
+model_dat3$tvc <- round(EOQ(eoq_ns['demand_avg'], eoq_ns['part_cost'], eoq_ns['storage_cost'], eoq_ns['rhit_cost_avg'])[[4]], 2)
+
+#Filter any tvc of 0 or NA.
+model_dat3 <- model_dat3 %>% filter(tvc > 0)
+
+#For display filter out any part with no or extremely low yearly variable cost.
+model_dat3  %>% filter(tvc > 0.5)
+
+
+
+```
+
+```{r}
+#Total variable cost for EOQ model.
+paste("TVC for EOQ model with no safety stock:", paste('$',formatC(round(sum(model_dat3$tvc),2), big.mark=',', format = 'f')))
+```
+
+Interestingly the TVC of the EOQ model without safety stock is lower than the current TVC and only slightly higher than the EOQ with safety stock.  
+* Having no safety stock would have a high risk of rhits, but could considerable lower the fixed cost of the DC.  
+* Future advances in optimization techniques would likely lead to a need for far lower levels of safety stock.
+
+## EOQ with monthly data
+
+```{r}
+#Creating a table of monthly averages for each dim.
+demand_month <-  demand %>%
+  group_by(dim) %>%
+  summarise(demand_mavg = sum(demand_qty) / (num_years * 12),
+            rhit_mavg = sum(rhit) / (num_years * 12),
+            rhit_cost_mavg = (sum(rhit_cost) / sum(rhit_qty)) / (num_years * 12)) 
+
+#Dataframe prepped to receive model data
+model_dat4 <- parts %>%
+  left_join(demand_month, by = "dim")
+```
+
+```{r, warning=FALSE}
+
+#Create data in proper form for EOQ model
+#rhit_cost_avg is mutated to 0.0000001 instead of 0 due to bug in package.
+eoq_m <- model_dat4 %>%
+  mutate(rhit_cost_mavg = if_else(is.na(rhit_cost_mavg) | rhit_cost_mavg == 0, 0.0000001, rhit_cost_mavg)) %>%
+  mutate(demand_mavg = demand_mavg - safety_stock_qty) %>%  #Subtracted safety stock from demand bc EOQ assumes 0 ss.
+  mutate(storage_cost = storage_cost/12) %>%
+  select(demand_mavg,  part_cost, storage_cost, rhit_cost_mavg)
+
+#Model value for optimized order quantity.
+model_dat4$q <- round(EOQ(eoq_m['demand_mavg'], eoq_m['part_cost'], eoq_m['storage_cost'], eoq_m['rhit_cost_mavg'])[[1]], 2)
+
+#Model value for optimized cycle length.
+model_dat4$cycle_length <- round(EOQ(eoq_m['demand_mavg'], eoq_m['part_cost'], eoq_m['storage_cost'], eoq_m['rhit_cost_mavg'])[[2]], 2)
+
+#Model value for maximum allowable rhit quantity.
+model_dat4$max_rhit_qty <- round(EOQ(eoq_m['demand_mavg'], eoq_m['part_cost'], eoq_m['storage_cost'], eoq_m['rhit_cost_mavg'])[[3]], 2)
+
+#Model value for optimized total variable cost for each part.
+model_dat4$tvc <- round(EOQ(eoq_m['demand_mavg'], eoq_m['part_cost'], eoq_m['storage_cost'], eoq_m['rhit_cost_mavg'])[[4]], 2)
+
+#Filter any tvc of 0 or NA.
+model_dat4 <- model_dat4 %>% filter(tvc > 0)
+
+#For display filter out any part with no or extremely low yearly variable cost.
+model_dat4  %>% filter(tvc > 0.5)
+
+
+```
+
+```{r}
+#Total variable cost for EOQ model.
+paste("TVC for monthly EOQ model:", paste('$',formatC(round(sum(model_dat4$tvc),2), big.mark=',', format = 'f')))
+```
+
+The monthly number is low and extrapolates out to a yearly TVC that was half of what we originally got.  
+*  The monthly figure is not as helpful because it has such a low average rhit cost level that it is skewed toward taking more rhits rather than storing items.
+*  Due to this, this figure was not included in the final analysis because running the model on just monthly data does not provide enough data to accurately optimize the DC.
