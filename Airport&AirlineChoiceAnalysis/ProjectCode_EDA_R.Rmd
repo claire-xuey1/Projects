@@ -1,0 +1,731 @@
+---
+title: "BUAN5310 group project"
+output:
+  html_document:
+    df_print: paged
+---
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# Course: BUAN5310
+# Title: Modeling Passengers’ Airport and Airline Choice Behavior
+# Purpose: EDA and variable pre-selection
+# Date: June 8th, 2019
+# Author: Yifan Xiang, 
+
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+# Clear environment of variables and functions
+rm(list = ls(all = TRUE)) 
+
+# Clear environmet of packages
+if(is.null(sessionInfo()$otherPkgs) == FALSE)lapply(paste("package:", names(sessionInfo()$otherPkgs), sep=""), detach, character.only = TRUE, unload = TRUE)
+
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# Load packages
+library(tidyverse)
+library(gridExtra)
+library(GGally)
+library(stringr)
+library(janitor)
+library(grid)
+library(readxl)
+library(gdata)
+library(MASS)
+```
+
+# Load, review and modify data
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# Load datasets
+choice<- read_excel("airport_choice_survey_EN_ver2.0_Capstone.xlsx", sheet = "Data", na = "NA")
+
+# remove ID, FlightNo, DepartureHr, DepartureMn  
+data<- dplyr::select(choice, -c(ID,FlightNo,DepartureHr,DepartureMn))
+
+# Review Data
+summary(data)
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+# Remove records with NA in Airport and Airline columns
+data <- data %>%
+  filter(!is.na(Airport)) %>%
+  filter(!is.na(Airline))
+
+## 3 NA in Gender, 2 NA in Destination, 4 NA in SeatClass, 150 NA in Airfare, 194 NA in AccessCost, 94 NA in AccessTime, 127 NA in Income, 388 NA in Mileage
+
+# Rename some variables for easier analysis
+data <- data %>% 
+ mutate(Airport = ifelse(Airport == 1, "ICN", "GMP")) %>%
+  mutate(Airline = ifelse(Airline == 1, "Korean Air", 
+                   ifelse(Airline == 2, "Asiana Airlines", 
+                   ifelse(Airline == 3,"Korean LLC", "Foreign Carriers")))) %>%
+
+  mutate(Nationality  = ifelse(Nationality == 1, "Korea",
+                       ifelse(Nationality == 2, "China",
+                       ifelse(Nationality == 3, "Japan",
+                       ifelse(Nationality == 4, "Southeast Asia", "Other"))))) %>%
+  
+  mutate(TripPurpose = ifelse(TripPurpose == 1, "Leisure",
+                        ifelse(TripPurpose == 2, "Business", "Other"))) %>%
+ 
+   mutate(ProvinceResidence = ifelse(ProvinceResidence == 1,"Seoul",
+                    ifelse(ProvinceResidence == 3, "Kyungki-do","Other"))) %>%
+
+    mutate(GroupTravel = ifelse(GroupTravel == 1,"Yes", "No")) %>%
+  
+# regroup Frequent Flight Destination column: 4,5,6,7 become other
+   mutate(FrequentFlightDestination = ifelse(FrequentFlightDestination == 1, "Southeast Asia", 
+                                     ifelse(FrequentFlightDestination == 2,"China",
+                                     ifelse(FrequentFlightDestination == 3, "Japan","Other")))) %>%
+  
+  mutate(Destination = ifelse(Destination ==1, "China",
+                       ifelse(Destination ==2, "Japan",
+                       ifelse(Destination ==3, "SouthEast Asia", "Other")))) %>%
+  
+  mutate(DepartureTime = ifelse(DepartureTime == 1, "6am-12pm",
+                         ifelse(DepartureTime ==2, "12pm-6pm",
+                         ifelse(DepartureTime ==3, "6pm-9pm","9pm-6am")))) %>%
+
+# NA in seat class is categorize as economy
+  mutate(SeatClass = ifelse(SeatClass == 3 | SeatClass == 2, "First/Business", "Economy")) %>% 
+  
+  mutate(Gender = ifelse(Gender == 1, "Male", 
+               ifelse(Gender == 2, "Female", NA))) %>% 
+  
+  mutate(ModeTransport = ifelse(ModeTransport == 1, "Car",
+                         ifelse(ModeTransport == 2, "Taxi",
+                         ifelse(ModeTransport == 6, "Limo",
+                         ifelse(ModeTransport < 9, "Transit", "Other"))))) %>% 
+  
+  mutate(Occupation = ifelse(Occupation == 2 | Occupation == 3 | Occupation == 5 | Occupation == 7, "Professional", 
+                      ifelse(Occupation == 8, "Student",
+                      ifelse(Occupation == 9, "Housewife",
+                      ifelse(Occupation == 10 | Occupation == 11, "None", "Other"))))) 
+
+# Drop Mileage, Mileage Airline column due to too many missing values
+data <- dplyr::select(data, -c(Mileage, MileageAirline))
+
+summary(data)
+
+```
+
+Now, we deal with missing values. For numeric variables, we take averages to fill in the missing values. Categorical variables are done on a case-by-case basis, NA values typically lumped in with "Other".
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# fix NAs in data
+
+# Put in more specific averages for missing Airfare data
+avg <- median(data$Airfare, na.rm = TRUE)
+avgs <- data %>% 
+  group_by(Airport, Airline, Destination) %>% 
+  summarise(median_airfare = median(Airfare, na.rm = TRUE)) %>% 
+  filter(median_airfare != "NaN") %>% 
+  filter(!is.na(Destination))
+data <- left_join(data, avgs, by = c("Airport", "Airline", "Destination"))
+data$Airfare <- ifelse(is.na(data$Airfare), data$median_airfare, data$Airfare)
+data$Airfare <- ifelse(is.na(data$Airfare), avg, data$Airfare)
+data <- dplyr::select(data, -median_airfare)
+
+# put in specific averages for AccessCost and AccessTime
+avgs <- data %>% 
+  group_by(Airport,ProvinceResidence) %>% 
+  summarise(median_accesscost = median(AccessCost, na.rm = TRUE),
+            median_accesstime = median(AccessTime, na.rm = TRUE))
+data <- left_join(data, avgs, by = c("Airport", "ProvinceResidence"))
+data$AccessCost <- ifelse(is.na(data$AccessCost), data$median_accesscost, data$AccessCost)
+data$AccessTime <- ifelse(is.na(data$AccessTime), data$median_accesstime, data$AccessTime)
+data <- dplyr::select(data, -c("median_accesscost", "median_accesstime"))
+
+# Put in specific averages for Income
+avg <- median(data$Income, na.rm = TRUE)
+data <- data %>% 
+  mutate(age_group = ifelse(Age < 18, "child", 
+                     ifelse(Age < 30 & Age >=18, "18-30",
+                     ifelse(Age < 50 & Age >= 30, "30-49",
+                     ifelse(Age < 70 & Age >= 50, "50-69", "70+")))))
+avgs <- data %>% 
+  group_by(age_group, Occupation) %>% 
+  summarise(median_income = median(Income, na.rm = TRUE))
+data <- left_join(data, avgs, by = c("age_group", "Occupation"))
+data$Income = ifelse(is.na(data$Income), data$median_income, data$Income)
+data$Income = ifelse(is.na(data$Income), avg, data$Income)
+data <- dplyr::select(data, -c("age_group", "median_income"))
+
+# Destination labelled other
+data$Destination <- ifelse(is.na(data$Destination), "Other", data$Destination)
+
+# Seatclass as economy
+data$SeatClass <- ifelse(is.na(data$SeatClass), "Economy", data$SeatClass)
+
+# Gender as female (only 3 cases)
+data$Gender <- ifelse(is.na(data$Gender), "Female", data$Gender)
+
+# Change Income from numerical to character
+data$Income <- as.character(data$Income)
+
+
+```
+
+```{r}
+summary(data)
+str(data)
+```
+
+
+# Basic Visualization
+
+## Univariate Data Exploration
+
+### categorical variables
+
+We dealt with outliers by grouping them into larger groups
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+  
+
+grid.arrange(
+  data %>% 
+    ggplot(aes(Airport)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(Airline)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(GroupTravel)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(ModeTransport)) +
+    geom_bar() +
+    coord_flip(),
+  data %>% 
+    ggplot(aes(Occupation)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(Nationality)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(TripPurpose)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(ProvinceResidence)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(FrequentFlightDestination)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(Destination)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(SeatClass)) +
+    geom_bar() + 
+    coord_flip(),
+  data %>% 
+    ggplot(aes(Gender)) +
+    geom_bar() + 
+    coord_flip(),
+   data %>% 
+    ggplot(aes(DepartureTime)) +
+    geom_bar() + 
+    coord_flip(),
+   data %>%
+    ggplot(aes(Income)) +
+    geom_bar()+
+    coord_flip(),
+  ncol = 4
+  )
+
+```
+
+
+### numerical variables
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# Cap values to reduce the impact of outliers
+data <- data %>% 
+  mutate(TripDuration = ifelse(TripDuration > 300, 300, TripDuration)) %>% 
+  mutate(FlyingCompanion = ifelse(FlyingCompanion > 15, 15, FlyingCompanion)) %>% 
+  mutate(NoTripsLastYear = ifelse(NoTripsLastYear > 20, 20, NoTripsLastYear)) %>% 
+  mutate(Airfare = ifelse(Airfare > 200, 200, Airfare)) %>% 
+  mutate(AccessCost = ifelse(AccessCost > 40000, 40000, AccessCost)) %>% 
+  mutate(AccessTime = ifelse(AccessTime > 200, 200, AccessTime))
+
+# Count histogram
+count_hist <- function(x){
+  x + geom_histogram(bins = 52) +
+    theme_bw() +
+    theme(panel.border =  element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    labs(y = "Count")
+}
+
+# Create bar graphs
+grid.arrange(
+  count_hist(ggplot(data, aes(Age))),
+  count_hist(ggplot(data, aes(TripDuration))),
+  count_hist(ggplot(data, aes(FlyingCompanion))),
+  count_hist(ggplot(data, aes(NoTripsLastYear))),
+  count_hist(ggplot(data, aes(Airfare))),
+  count_hist(ggplot(data, aes(NoTransport))),
+  count_hist(ggplot(data, aes(AccessCost))),
+  count_hist(ggplot(data, aes(AccessTime)))
+)
+
+```
+
+# Variable Selection
+
+We used a combination of Anova and Chi-Squared tests, and Stepwise method to determine which variables to include in our model. We elected to include only variables with p<0.05 and selected by Stepwise method in our model.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# turn character vectors into factors
+data <- data %>% mutate_if(is.character, as.factor)
+
+# create a data frame of categorical and of numeric variables
+is.fact <- sapply(data, is.factor)
+data_factors <- data[, is.fact]
+data_notfactors <- data[, !is.fact]
+
+# summary of final data
+print(summary(data))
+```
+
+
+## Airport variables selection
+
+### Anova test & Chi-Squared test
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+# Only select variables with P-value less than 0.05
+print("Variables to include in the Airport Model:")
+
+#Chi-Squared test for Airport
+for (var in names(data_factors)){
+  tab <- table(data$Airport, data[[var]])
+  pval <- chisq.test(tab, simulate.p.value = TRUE)$p.value
+  if(as.numeric(pval) < 0.05){
+    print(var)
+  }
+}
+#Anova test for Airport
+for (var in names(data_notfactors)) {
+  anova = aov(data[[var]]~data$Airport)
+  pval <- unlist(summary(anova))["Pr(>F)1"]
+  if(as.numeric(pval) < 0.05){
+    print(var)
+  }
+}
+```
+
+From our Chi-Squared and Anova tests, we have informed the initial variables we expect to include in our models (12 variables selected). 
+
+### Stepwise
+
+We use stepwise function to rechoose variables and compare the result we got from Anova and Chi-Squared tests.
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+## Airport full model
+full.model.airport <- glm(Airport~., data = data, family = binomial)
+summary(full.model.airport)
+```
+
+Variables that are significant at 5% level: Airline, Nationality, FlyingCompanion, FrequentFlightDestination, Destination, DepartureTime, NoTransport, ModeTransport, AccessCost, and Income.
+
+```{r}
+# Airport backward selection
+backward_airport <- stepAIC(full.model.airport, direction = "backward", trace = FALSE)
+summary(backward_airport)
+```
+
+AIC dropped from 325.94 to 311.54.
+Variables that are selected by the backward method: Airline, Nationality, FlyingCompanion, FrequentFlightDestination, Destination, DepartureTime, NoTransport, ModeTransport, AccessCost, and Ocupation.
+
+
+```{r}
+# Airport forward selection
+nothing.airport <- glm(Airport~1,  data = data,family = binomial)
+forwards.airport <- step(nothing.airport, scope = list(lower = formula(nothing.airport), upper = formula(full.model.airport)), direction = "forward", trace = FALSE) 
+summary(forwards.airport)
+```
+
+Forwards method provides the same result as backwards method.
+The result we got from stepwise method is in consistent with the significant level in full model.
+However, the stepwise method provides a result that is different from anova test and chi-squred test.
+
+
+```{r}
+# Test the logit model of the anova test result
+
+logit_anova.airport <- glm(formula = Airport ~ Airline + Nationality + TripPurpose + FrequentFlightDestination + ProvinceResidence + Destination + DepartureTime + Occupation + Income + Age + Airfare + NoTransport, family = binomial, data = data)
+summary(logit_anova.airport)
+```
+
+The AIC of logic model with variables chosen from stepwise method is lower than the AIC of logic model with variables chosen from anova test. Thus, we use variables chose from stepwise method as our starting point. 
+
+
+
+## Multi-variate Data Exploration 
+
+Visualize those variables to support our variable selection.
+
+### Correlation
+
+### categorical variables 
+
+```{r}
+# Function for heatmap
+ heat_map <- function (x, y,y_title,x_title){
+   x<-enquo(x)
+   y<-enquo(y)
+   
+   
+   data %>%
+     group_by(!!x,!!y) %>%
+     summarise(count = n())  %>%
+     ggplot(aes(!!x,!!y)) +
+     geom_tile(aes(fill = -count))+
+     ylab(y_title) + xlab(x_title)+
+     scale_fill_continuous(guide = guide_legend(title = "Count"))
+      }
+# Create heatmap to see relationship between Airport and selected categorical variables
+grid.arrange(
+  heat_map(Airport, Airline, "Airline","Airport"),
+  heat_map(Airport, FrequentFlightDestination, "FrequentFlightDestination","Airport"),
+  heat_map(Airport, Destination, "Destination","Airport"),
+  heat_map(Airport, DepartureTime,"DepartureTime","Airport"),
+  heat_map(Airport, Occupation, "Occupation","Airport"),
+  heat_map(Airport, Nationality, "Nationality","Airport"),
+  heat_map(Airport, ModeTransport, "ModeTransport", "Airport"), 
+  heat_map(Airport, ProvinceResidence, "ProvinceResidence", "Airport"),
+  heat_map(Airport, Income, "Income", "Airport")
+  
+)
+```
+
+ProvinceResidence is very similar to Nationality, according to the heat_map, we choose Nationality, drop ProvinceResidence
+Income is very similar to Occupation, according to the heat_map, we choose Occupation, drop Income
+
+### numerical variables 
+
+```{r}
+# Create box-plot for numerical variables
+grid.arrange(
+ggplot(data, aes(Airport, Age)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airport, AccessCost)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airport, Airfare)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airport, NoTransport)) +
+  geom_boxplot() +
+  coord_flip(),
+ncol = 3
+
+)
+
+```
+
+According to the box-plot, we drop NoTransport.
+Since AccessCost is already reflected ModeTransport, we drop ModeTransport
+Since Age is already reflected in Occupation, we drop Age
+Since AccessCost is already reflected in NoTransport, and NoTransport is more Significant than AccessCost, we keep NoTransport
+
+*** Summary ***
+Variables chose for Airport selection model:
+ Airline, FrequentFlightDestination, Destination, DepartureTime, Occupation,  Nationality, AccessCost, Airfare
+ 
+```{r}
+# Logit model - add interaction term: Airfare * Destination
+
+logit.final.airport <- glm(Airport ~ Airline + FrequentFlightDestination + Destination+DepartureTime + Occupation + Nationality + NoTransport + Airfare + Airfare * Destination, family = binomial, data = data)
+summary(logit.final.airport)
+```
+
+### Airline variables selection
+
+### Anova test & Chi-Squared test
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+#Chi-Squared test for Airline
+
+print("Variables to include for the Airline Models:")
+for (var in names(data_factors)){
+  tab <- table(data$Airline, data[[var]])
+  pval <- chisq.test(tab, simulate.p.value = TRUE)$p.value
+  if(as.numeric(pval) < 0.05){
+    print(var)
+  }
+}
+#Anova test for Airport
+for (var in names(data_notfactors)) {
+  anova = aov(data[[var]]~data$Airline)
+  pval <- unlist(summary(anova))["Pr(>F)1"]
+  if(as.numeric(pval) < 0.05){
+    print(var)
+  }
+}
+
+
+```
+From our Chi-Squared and Anova tests, we have informed the initial variables we expect to include in our models (14 variables selected). 
+
+### Stepwise
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+## airline
+library(nnet)
+full.model.airline <- multinom(Airline~., data = data)
+summary(full.model.airline)
+
+
+```
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+# Backward method
+backward_airline <- stepAIC(full.model.airline, direction = "backward", trace = FALSE)
+summary(backward_airline)
+```
+
+AIC dropped from 1110.524 to 1070.103
+Variables that are selected by the backward method: Airport, TripDuration, FlyingCompanion, FrequentFlightDestination, Destination,DepartureTime, SeatClass, Airfare, NoTransport, Occupation, Income
+
+
+```{r}
+
+# Forward method
+nothing <- multinom(Airline~1,  data = data)
+
+forwards_airline <- step(nothing, scope = list(lower = formula(nothing), upper = formula(full.model.airline)), direction = "forward") 
+summary(forwards_airline)
+```
+
+Forward method provides the lowest AIC.
+variables selcet:
+Destination, Airfare, DepartureTime, Airport, FlyingCompanion, NoTransport, FrequentFlightDestination, TripDuration, NoTripsLastYear
+
+```{r}
+# Test the logit model of the anova test result
+logit.anova.airline <- multinom(formula = Airline ~ Nationality + TripPurpose + ProvinceResidence + GroupTravel + FrequentFlightDestination + Destination + DepartureTime + Occupation + Age + TripDuration + FlyingCompanion + Airfare + NoTripsLastYear, data = data)
+summary(logit.anova.airline)
+```
+The logit model of anova method provides the highest AIC, we choose to use the result from forward method as our starting point.
+
+Variables different from Anova test and Stepwise method: 
+Nationality, ProvinceResidence, GroupTravel, Occuaption, Age, 
+
+## Multi-variate Data Exploration 
+
+Visualize those variables to support our variable selection.
+
+### Correlation
+
+### categorical variables 
+
+```{r}
+
+# Create heatmap to see relationship between Airport and selected categorical variables
+grid.arrange(
+  heat_map(Airline, Airport, "Airline","Airline"),
+  heat_map(Airline, FrequentFlightDestination, "FrequentFlightDestination","Airline"),
+  heat_map(Airline, Destination, "Destination","Airline"),
+  heat_map(Airline, DepartureTime,"DepartureTime","Airline"),
+  heat_map(Airline, Occupation, "Occupation","Airline"),
+  heat_map(Airline, Nationality, "Nationality","Airline"),
+  heat_map(Airline, ProvinceResidence, "ProvinceResidence", "Airline")
+  
+)
+```
+
+According to the heatmap, we choose to drop Nationality. 
+
+### numerical variables 
+
+```{r}
+# Create box-plot for numerical variables
+grid.arrange(
+ggplot(data, aes(Airline, Age)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airline, TripDuration)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airline, FlyingCompanion)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airline, NoTripsLastYear)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airline, Airfare)) +
+  geom_boxplot() +
+  coord_flip(),
+ggplot(data, aes(Airline, NoTransport)) +
+  geom_boxplot() +
+  coord_flip(),
+ncol = 3
+
+)
+
+```
+
+According to the Box-Plot, we choose to drop NoTransport.
+
+```{r}
+logit.final.airline <- multinom(formula = Airline ~ Destination + Airfare + DepartureTime + 
+    Airport + FlyingCompanion + FrequentFlightDestination + 
+    TripDuration + NoTripsLastYear, data = data)
+
+summary(logit.final.airline)
+```
+
+
+```{r}
+# add interaction term into the model
+logit.final.interaction.airline <- multinom(formula = Airline ~ Destination + Airfare + DepartureTime + 
+    Airport + FlyingCompanion + FrequentFlightDestination + TripDuration + 
+    NoTripsLastYear + Airfare * Destination, data = data)
+
+summary(logit.final.interaction.airline )
+```
+
+The logit model with interaction term provides the lowest AIC.
+
+## Try to change the levels of airline (Korean Air vs Foreign Air)
+
+
+```{r}
+data1 <- data %>% 
+  mutate(Airline = ifelse(Airline == "Korean Air", "Korean Air",
+                    ifelse(Airline == "Korean LLC", "Korean Air",
+                    ifelse(Airline == "Asiana Airlines","Korean Air",
+                                        "Foreign Air"))))
+
+print(str(data1))
+print(summary(data1))
+```
+
+## ANOVA & Chi-Square
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+# turn character vectors into factors
+data1 <- data1 %>% mutate_if(is.character, as.factor)
+
+# create a data frame of categorical and of numeric variables
+is.fact <- sapply(data1, is.factor)
+data1_factors <- data1[, is.fact]
+data1_notfactors <- data1[, !is.fact]
+
+
+
+
+print("Variables to include in the Airline Model:")
+
+#Chi-Squared test for Airport
+for (var in names(data1_factors)){
+  tab <- table(data1$Airline, data1[[var]])
+  pval <- chisq.test(tab, simulate.p.value = TRUE)$p.value
+  if(as.numeric(pval) < 0.05){
+    print(var)
+  }
+}
+#Anova test for Airport
+for (var in names(data1_notfactors)) {
+  anova = aov(data1[[var]]~data1$Airline)
+  pval <- unlist(summary(anova))["Pr(>F)1"]
+  if(as.numeric(pval) < 0.05){
+    print(var)
+  }
+}
+```
+
+## stepwise
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+library(MASS)
+## full model airline
+full.model.airline1 <- glm(Airline~., data = data1, family = binomial)
+print(summary(full.model.airline1))
+```
+
+
+```{r}
+# Backward method
+backward_airline1 <- stepAIC(full.model.airline1, direction = "backward", trace = FALSE)
+summary(backward_airline1)
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE}
+
+# Forwards method
+nothing <- glm(Airline~1,  data = data1,family = binomial)
+forwards <- step(nothing, scope = list(lower = formula(nothing), upper = formula(full.model.airline1)), direction = "forward", trace = FALSE) 
+summary(forwards)
+
+```
+
+```{r}
+#test the logic model of the anova test result
+
+model_anova <- glm(formula = Airline ~ Airport + Nationality+
+                     FrequentFlightDestination+Destination+FlyingCompanion, family = binomial, data = data1)
+summary(model_anova)
+```
+
+```{r}
+# Add interaction term (airfare, destination) into model
+model2 <- glm(formula = Airline ~ Airport + Nationality+
+                     FrequentFlightDestination+Destination+FlyingCompanion + Airfare * Destination, family = binomial, data = data1)
+summary(model2)
+```
+
+
+```{r}
+
+# Add airfare into model
+model <- glm(formula = Airline ~ Airport + Nationality+
+                     FrequentFlightDestination+Destination+FlyingCompanion+Airfare , family = binomial, data = data1)
+summary(model)
+```
+
+```{r}
+Airline2_stepwise <- data1 %>% dplyr::select(c(Airline, Airport, FlyingCompanion, Destination, DepartureTime, SeatClass, Airfare, NoTransport, ModeTransport, AccessCost, Occupation))
+
+Airline2_dk <- data1 %>% dplyr::select(c(Airline, Airport, Destination,Airfare))
+
+write_csv(Airline2_stepwise,"Airline2_stepwise.csv")
+write_csv(Airline2_dk,"Airline2_dk.csv")
+```
+
+
+
+# Write to CSV file
+
+```{r}
+
+# write airort csv file
+write_csv(data, "full.csv")
+
+```
+
+
+
+
+
+
