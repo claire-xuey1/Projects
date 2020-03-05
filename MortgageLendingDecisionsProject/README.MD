@@ -6,15 +6,16 @@ As discussed in Munnell et al (1996), the HMDA data indicate whether an applican
 
 # Dataset
 The data set includes the following variables:
-APPROVE = 1 if mortgage loan was approved, = 0 otherwise \n
-GDLIN = 1 if credit history meets guidelines, = 0 otherwise \n
-LOANPRC = loan amount/purchase price \n
-OBRAT = other obligations as a percent of total income \n
-MALE = 1 if male, = 0 otherwise \n
-MARRIED = 1 if married, = 0 otherwise \n
-BLACK = 1 if black, = 0 otherwise \n
-HISPAN = 1 if Hispanic, = 0 otherwise \n
-(All applicants are non-Hispanic white, non Hispanic black, or Hispanic.  In 1990 about 94% of Boston residents were white, Black, or Hispanic. (Links to an external site.))\n
+
+APPROVE = 1 if mortgage loan was approved, = 0 otherwise
+GDLIN = 1 if credit history meets guidelines, = 0 otherwise
+LOANPRC = loan amount/purchase price
+OBRAT = other obligations as a percent of total income
+MALE = 1 if male, = 0 otherwise
+MARRIED = 1 if married, = 0 otherwise
+BLACK = 1 if black, = 0 otherwise
+HISPAN = 1 if Hispanic, = 0 otherwise
+(All applicants are non-Hispanic white, non Hispanic black, or Hispanic.  In 1990 about 94% of Boston residents were white, Black, or Hispanic. (Links to an external site.))
 
 In the project, we apply probit and logit models to predit probabilities of loan approval for the entire sample and for each racial/ethnic group.
 After controlling for relevant characteristics, we analyze the race/ethnicity effect associated with the outcome of a mortgage loan application.
