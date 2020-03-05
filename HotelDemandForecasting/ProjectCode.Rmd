@@ -1,0 +1,4130 @@
+---
+title: "Forecast_Group6"
+author: "Ying Xue, Qiuye Liu"
+output: 
+  html_document: 
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+# Clear environment and load package
+```{r echo=FALSE, message=FALSE, error=FALSE, warning=FALSE}
+# Clear environment
+rm(list = ls(all = TRUE))
+
+# Install package
+library(htmlTable)
+library(fastDummies)
+library(neuralnet)
+library(data.table)
+library(gridExtra)
+library(grid)
+library(forecast)
+library(ggplot2)
+library(magrittr)
+library(lubridate)
+library(zoo)
+library(tidyverse)
+library(urca)
+library(rlist)
+library(caret)
+library(sigmoid)
+```
+
+# Load data and create necessary columns
+```{r}
+
+
+raw_data <- read.csv("hotel_data.csv")
+
+glimpse(raw_data)
+
+# select column with interest
+columns <- c("MNEMONIC_CD", "stay_date", "CONF_DT","accom_rm_qty")
+booking_data <- raw_data[columns] %>% 
+  mutate(stay_date=mdy(stay_date), 
+         CONF_DT = dmy(CONF_DT)) %>% 
+  dplyr::rename(hotel= MNEMONIC_CD)  %>% 
+  group_by(hotel, stay_date, CONF_DT) %>% 
+  summarise(bookings = sum(accom_rm_qty))  %>%  ungroup() %>%
+  group_by(hotel, stay_date) %>%
+  mutate(max_b_date=stay_date, min_b_date=min(CONF_DT)) %>% ungroup() 
+
+# create fill in dataset
+GLWST <- data.frame(hotel = 'GLWST', CONF_DT = seq.Date(from = as.Date("2007-06-27",format = "%Y-%m-%d"), by = "day", length.out = 1039))
+MLKEP <- data.frame(hotel = 'MLKEP', CONF_DT = seq.Date(from = as.Date("2007-06-27",format = "%Y-%m-%d"), by = "day", length.out = 1039))
+WARUK <- data.frame(hotel = 'WARUK', CONF_DT = seq.Date(from = as.Date("2007-06-27",format = "%Y-%m-%d"), by = "day", length.out = 1039))
+
+merge_data <- rbind(GLWST,MLKEP ) %>% rbind(WARUK)
+
+GLWST <- data.frame(hotel = 'GLWST', stay_date = seq.Date(from = as.Date("2008-05-01",format = "%Y-%m-%d"), by = "day", length.out = 730))
+MLKEP <- data.frame(hotel = 'MLKEP', stay_date = seq.Date(from = as.Date("2008-05-01",format = "%Y-%m-%d"), by = "day", length.out = 730))
+WARUK <- data.frame(hotel = 'WARUK', stay_date= seq.Date(from = as.Date("2008-05-01",format = "%Y-%m-%d"), by = "day", length.out = 730))
+
+merge_data1 <- rbind(GLWST,MLKEP ) %>% rbind(WARUK)  
+
+
+merge_dataset <- merge(merge_data, merge_data1, by ="hotel", all = TRUE) %>% filter(stay_date >= CONF_DT ) 
+
+
+# merge fill in dataset with booking dataset
+
+booking_data_merge <- booking_data %>% select (c(hotel,stay_date,max_b_date,min_b_date)) %>% distinct()
+
+booking_data_merge2 <- booking_data %>% select (c(hotel,stay_date,CONF_DT,bookings))
+
+data_1 <- left_join(merge_dataset, booking_data_merge, by = c("hotel", "stay_date"))
+
+filled_data <- left_join(data_1 , booking_data_merge2, by = c("hotel", "stay_date","CONF_DT"))  %>% 
+  filter(CONF_DT <= max_b_date & CONF_DT >= min_b_date ) %>% 
+  mutate(bookings = replace_na(bookings, 0))
+
+
+# create days_prior,bookings,cum_bookings,DOW,month,week, rate colum for later analysis
+
+ filled_data_full <- filled_data %>% 
+  arrange(hotel,stay_date,CONF_DT) %>% 
+  group_by(hotel, stay_date) %>% 
+  mutate(cum_bookings = cumsum(bookings),
+         final_arrivals=max(cum_bookings),
+         rate = cum_bookings/final_arrivals,
+         add = final_arrivals - cum_bookings)  %>%  ungroup() %>%
+  mutate(year = year(stay_date),
+         week = week(stay_date),
+         month = zoo::as.yearmon(stay_date,label = TRUE), 
+         quarter = zoo::as.yearqtr(stay_date,label = TRUE),
+         DOW = wday(stay_date,label = TRUE), 
+         days_prior = as.numeric(difftime(stay_date, CONF_DT, units = "days"))) %>% 
+           
+  mutate(days_prior_c = ifelse(days_prior >= 1 & days_prior <= 7, '1 to 7',
+                        ifelse(days_prior >= 8 & days_prior <= 14, '8 to 14',
+                        ifelse(days_prior >= 15 & days_prior <= 21, '15 to 21',
+                        ifelse(days_prior >= 22 & days_prior <= 28, '22 to 28',
+                        ifelse(days_prior >= 29 & days_prior <= 59, '29 to 60', '60 or more')))))) %>% 
+   
+ mutate(days_prior_c = as.factor(days_prior_c)) 
+                       
+          
+
+# split data set into training and test parts with test sets for last 6 months(2009-11-1 to 2010-4-30) 
+training_data <-  filled_data_full %>% filter(stay_date < '2009-11-1') # 2008-05-01 to 2009-10-31
+test_data <-  filled_data_full %>% filter(stay_date >= '2009-11-1') # 2009-11-1 to 2010-4-30
+
+
+
+```
+
+# Advance booking curve plot
+
+## plot overal booking curve graph by hotel
+```{r}
+
+c0 <- training_data %>% filter(days_prior <= 90) %>%
+  group_by(hotel, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking)) + 
+    geom_point(aes(color= hotel)) +
+    ggtitle("Booking curve by days prior of arrival and by hotel") +
+    xlab("days prior to arrival") + ylab("arrivals_rate")+
+    labs(color = "Hotel")+
+    theme_minimal() 
+c0
+
+```
+**Observations**
+
++ booking pace is different for 3 hotels. for hotel MLKEP and WARUK, Demand are more likely to be realized at the last minute. There are more early bookings for hotel GLWST
+
+## plot booking curve graph by DOW by hotel
+```{r}
+# hotel GLWST
+c1 <- training_data  %>% filter (hotel == "GLWST") %>%  filter(days_prior <= 90) %>%
+  group_by(DOW, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = DOW)) + 
+    geom_line() +
+    ggtitle("GLWST booking curve by DOW")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal()  
+
+c1
+
+# hotel MLKEP
+c2 <- training_data  %>% filter (hotel == "MLKEP") %>%  filter(days_prior <= 90) %>%
+  group_by(DOW, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = DOW)) + 
+    geom_line() +
+    ggtitle("MLKEP booking curve by DOW") + 
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal()  
+c2
+
+# hotel WARUK
+c3 <- training_data %>% filter (hotel == "WARUK") %>%  filter(days_prior <= 90) %>%
+  group_by(DOW, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = DOW)) + 
+    geom_line() +
+    ggtitle("WARUK booking curve by DOW") +
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal()  
+c3
+```
+**Observations**
+
++ hotel GLWST: the highest demand occurs on Saturday and demands was realized early in time.
+
++ hotel MLKEP: the highest demand occurs on Tuesday and Wednesday.
+
++ hotel WARUK: the highest demand occurs on Tuesday and Wednesday and demands on Saturday was realized at faster pace.
+
+## plot booking curve graph by yearmonth by hotel
+```{r}
+
+c1 <- training_data %>% mutate(month=as.factor(month)) %>% filter (hotel == "GLWST") %>%  
+  filter(days_prior <= 90) %>%
+  group_by(month, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = month)) + 
+    geom_line() +
+    ggtitle("GLWST booking curve by yearmonth")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal()  
+c1
+
+
+c2 <- training_data %>% mutate(month=as.factor(month)) %>% filter (hotel == "MLKEP") %>%  
+  filter(days_prior <= 90) %>%
+  group_by(month, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = month)) + 
+    geom_line() +
+    ggtitle("MLKEP booking curve by yearmonth")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal() 
+c2
+
+c3 <- training_data %>% mutate(month=as.factor(month)) %>% filter (hotel == "WARUK") %>% 
+   filter(days_prior <= 90) %>%
+  group_by(month, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = month)) + 
+    geom_line() +
+    ggtitle("WARUK booking curve by yearmonth")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal()  
+c3
+
+
+```
+
+
+## plot booking curve graph by yearquarter by hotel
+```{r}
+
+c1 <- training_data %>% mutate(quarter=as.factor(quarter)) %>% filter (hotel == "GLWST") %>% 
+   filter(days_prior <= 90) %>%
+  group_by(quarter, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = quarter)) + 
+    geom_line() +
+    ggtitle("GLWST booking curve by yearquarter")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal() 
+c1
+
+c2 <- training_data %>% mutate(quarter=as.factor(quarter)) %>% filter (hotel == "MLKEP") %>% 
+  filter(days_prior <= 90) %>%
+  group_by(quarter, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = quarter)) + 
+    geom_line() +
+    ggtitle("MLKEP booking curve by yearquarter")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal() 
+c2
+
+c3 <- training_data %>% mutate(quarter=as.factor(quarter)) %>% filter (hotel == "WARUK") %>% 
+   filter(days_prior <= 90) %>%
+  group_by(quarter, days_prior) %>% 
+  summarise(avg_booking = mean(rate)) %>%
+    ggplot(aes(x = days_prior,y = avg_booking,color = quarter)) + 
+    geom_line() +
+    ggtitle("WARUK booking curve by yearquarter")+
+    xlab("days prior to arrival") + ylab("arrivals_rate") + 
+    theme_minimal() 
+c3
+
+
+```
+
+
+# Time series plot
+## transform data to ts data
+```{r}
+# select the final stay day 
+GLWST_training_ts <- training_data %>% 
+  filter (hotel == "GLWST", days_prior == 0) 
+
+MLKEP_training_ts <- training_data %>% 
+  filter (hotel  == "MLKEP", days_prior == 0) 
+
+WARUK_training_ts <- training_data %>% 
+  filter (hotel  == "WARUK", days_prior == 0) 
+
+# time series data with daily frequency by hotel
+GLWST_training_d.ts <- ts(GLWST_training_ts[,8],start = c(2008,122) ,frequency =365)
+MLKEP_training_d.ts <- ts(MLKEP_training_ts[,8],start = c(2008,122) ,frequency =365)
+WARUK_training_d.ts <- ts(WARUK_training_ts[,8],start = c(2008,122) ,frequency =365)
+
+
+# time series data with weekly frequency by hotel
+# aggreate the weekly data by hotel
+GLWST_training_ts_w <- GLWST_training_ts %>% group_by(hotel, year,week) %>% summarise(avg_arrivals=mean(final_arrivals))%>% ungroup() 
+MLKEP_training_ts_w <- MLKEP_training_ts %>% group_by(hotel, year,week) %>% summarise(avg_arrivals=mean(final_arrivals))%>% ungroup() 
+WARUK_training_ts_w <- WARUK_training_ts %>% group_by(hotel, year,week) %>% summarise(avg_arrivals=mean(final_arrivals))%>% ungroup() 
+
+GLWST_training_w.ts <- ts(GLWST_training_ts_w[,4],start = c(2008,18) ,frequency = 53)
+MLKEP_training_w.ts <- ts(MLKEP_training_ts_w[,4],start = c(2008,18) ,frequency = 53)
+WARUK_training_w.ts <- ts(WARUK_training_ts_w[,4],start = c(2008,18) ,frequency = 53)
+
+# time series data with monthly frequency by hotel
+# aggreate the monthly data by hotel
+GLWST_training_ts_m <- GLWST_training_ts %>% group_by(hotel, month) %>% summarise(avg_arrivals= mean(final_arrivals))%>% ungroup() 
+MLKEP_training_ts_m <- MLKEP_training_ts %>% group_by(hotel, month) %>% summarise(avg_arrivals= mean(final_arrivals))%>% ungroup() 
+WARUK_training_ts_m<- WARUK_training_ts %>% group_by(hotel, month) %>% summarise(avg_arrivals= mean(final_arrivals))%>% ungroup() 
+
+GLWST_training_m.ts <- ts(GLWST_training_ts_m[,3],start = c(2008,5) ,frequency =12)
+MLKEP_training_m.ts <- ts(MLKEP_training_ts_m[,3],start = c(2008,5) ,frequency =12)
+WARUK_training_m.ts <- ts(WARUK_training_ts_m[,3],start = c(2008,5) ,frequency =12)
+
+
+# time series data with quarterly frequency by hotel
+# aggreate the weekly data by hotel
+GLWST_training_ts_q <- GLWST_training_ts %>% group_by(hotel, quarter) %>% summarise(avg_arrivals=mean(final_arrivals))%>% ungroup() 
+MLKEP_training_ts_q <- MLKEP_training_ts %>% group_by(hotel, quarter) %>% summarise(avg_arrivals=mean(final_arrivals))%>% ungroup() 
+WARUK_training_ts_q <- WARUK_training_ts %>% group_by(hotel, quarter) %>% summarise(avg_arrivals=mean(final_arrivals))%>% ungroup() 
+
+GLWST_training_q.ts <- ts(GLWST_training_ts_q[,3],start = c(2008,2) ,frequency = 4)
+MLKEP_training_q.ts <- ts(MLKEP_training_ts_q[,3],start = c(2008,2) ,frequency = 4)
+WARUK_training_q.ts <- ts(WARUK_training_ts_q[,3],start = c(2008,2) ,frequency = 4)
+
+```
+
+## plot by day by hotel
+```{r}
+
+grid.arrange(
+p1 <- GLWST_training_ts %>% 
+  ggplot(aes(x = stay_date, y =final_arrivals)) +
+  geom_line(col='blue') + 
+  xlab("stay_date     GLWST")+
+  scale_y_log10() + theme_minimal(),
+
+p2 <- MLKEP_training_ts %>%
+  ggplot(aes(x = stay_date,y = final_arrivals)) +
+  geom_line(col='green') + 
+  xlab("stay_date     MLKEP") + theme_minimal()+
+  scale_y_log10(),
+
+p3 <- WARUK_training_ts %>%
+  ggplot(aes(x = stay_date,y = final_arrivals)) +
+  geom_line(col='red') +
+  xlab("stay_date      WARUK")+ theme_minimal()+
+  scale_y_log10(),
+ncol=1,
+top = textGrob("Daily bookings by hotel",gp=gpar(fontsize=20,font=3))
+)
+```
+**Observations**
+
++ time plot of all three hotels show a downward trend at the year end of 2008 and begining of 2009. this decrease in demand could be due to the financial crisis occured at that time.
+
++ the overall pattern of GLWST hotel(blue curve) time plot looks irregular and random and the up and down pattern of other two hotels look more regular.
+
+
+## ACF correlogram
+```{r}
+ggAcf(GLWST_training_d.ts,main = "GLWST daily bookings Time Series ACF")
+ggAcf(GLWST_training_d.ts,main = "GLWST daily bookings Time Series ACF",lag.max = 32)
+ggAcf(GLWST_training_d.ts,main = "GLWST daily bookings Time Series ACF",lag.max = 200)
+
+ggAcf(MLKEP_training_d.ts,main = "MLKEP daily bookings Time Series ACF")
+ggAcf(MLKEP_training_d.ts,main = "MLKEP daily bookings Time Series ACF",lag.max = 32)
+ggAcf(MLKEP_training_d.ts,main = "MLKEP daily bookings Time Series ACF",lag.max = 200)
+
+ggAcf(WARUK_training_d.ts,main = "WARUK daily bookings Time Series ACF")
+ggAcf(WARUK_training_d.ts,main = "WARUK daily bookings Time Series ACF",lag.max = 32)
+ggAcf(WARUK_training_d.ts,main = "WARUK daily bookings Time Series ACF",lag.max = 200)
+```
+**Observations**
+
++ there is DOW seasoanlity occurs in all hotel graphs
+
++ for hotel GLWST, when we set the lag.max = 30, we see a repeated pattern every 7, 14, 20 days. There is more randomness in the graph compare to the other two hotels
+
++ compare to hotel GLWST, hotel MLKEP and WARUK show a cyclic pattern
+
+## plot by DOW by hotel
+```{r}
+
+p1 <- training_data %>% 
+  group_by(hotel, DOW) %>% 
+  summarise(arrivals = mean(final_arrivals)) %>%
+  ggplot(aes(DOW, arrivals, fill  = DOW)) +
+  geom_col() +
+  ggtitle("Average bookings by DOW by hotel") +
+  theme(legend.position = "none",axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "Day of Week", y = "Average arrivals") + 
+    facet_wrap(~ hotel)
+p1
+
+```
+**Observations**
+
++ hotel GLWST: the bookings are less varied by day of week. Saturday has slightly higher demands.
+
++ hotel MLKEP: the highest demand occurs on Tuesday and Wednesday
+
++ hotel WARUK: the highest demand occurs on Tuesday, Wednesday and Saturday
+
+
+
+## plot by yearweek by hotel
+```{r}
+
+grid.arrange(
+autoplot(GLWST_training_w.ts)+
+  ggtitle("GLWST")+
+  xlab("week")+
+  ylab("bookings"),
+autoplot(MLKEP_training_w.ts)+
+  ggtitle("MLKEP")+
+  xlab("week")+
+  ylab("bookings"),
+autoplot(WARUK_training_w.ts)+
+  ggtitle("WARUK") +
+  xlab("week")+
+  ylab("bookings"),
+top = textGrob("Weekly bookings by hotel",gp=gpar(fontsize=20,font=3))
+)
+```
+**Observations**
+
++ the lower demand at 2008 year end and beigining of 2009 are apparent in these graphs
+
++ correlogram and lag plot
+```{r}
+
+gglagplot(GLWST_training_w.ts,main = "GLWST Lagged scatterplots for weekly bookings.")
+gglagplot(MLKEP_training_w.ts,main = "MLKEP Lagged scatterplots for weekly bookings.")
+gglagplot(WARUK_training_w.ts,main = "WARUK Lagged scatterplots for weekly bookings.")
+
+ggAcf(GLWST_training_w.ts,main = "GLWST weekly bookings Time Series ACF")
+ggAcf(MLKEP_training_w.ts,main = "MLKEP weekly bookings Time Series ACF")
+ggAcf(WARUK_training_w.ts,main = "WARUK weekly bookings Time Series ACF")
+```
+**Observations**
+
++ the cyclic pattern for hotel MLKEP and hotel WARUK are more apparent on the weekly correlograms
+
+### Seasonal plot: weekly arrivals
+```{r}
+
+ggseasonplot(GLWST_training_w.ts , year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("arrivals") +
+  ggtitle("GLWST Seasonal plot: weekly arrivals")
+
+ggseasonplot(MLKEP_training_w.ts , year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("arrivals") +
+  ggtitle("MLKEP Seasonal plot: weekly arrivals")
+
+ggseasonplot(WARUK_training_w.ts , year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("arrivals") +
+  ggtitle("WARUK Seasonal plot: weekly arrivals")
+
+
+
+```
+**Observations**
+
++ we see the lower demand at the 2008 year end and beginning of 2009 for all three hotels
+
+
+## plot by yearmonth by hotel
+```{r}
+
+grid.arrange(
+autoplot(GLWST_training_m.ts)+
+  ggtitle("GLWST") +
+  xlab("month")+
+  ylab("bookings"),
+autoplot(MLKEP_training_m.ts)+
+  ggtitle("MLKEP") +
+  xlab("month")+
+  ylab("bookings"),
+autoplot(WARUK_training_m.ts)+
+  ggtitle("WARUK") +
+  xlab("month")+
+  ylab("bookings"),
+top = textGrob("Monthly bookings by hotel",gp=gpar(fontsize=20,font=3))
+)
+```
+
+
+### correlogram and lag plot
+```{r}
+gglagplot(GLWST_training_m.ts,main = "GLWST Lagged scatterplots for monthly bookings.")
+gglagplot(MLKEP_training_m.ts,main = "MLKEP Lagged scatterplots for monthly bookings.")
+gglagplot(WARUK_training_m.ts,main = "WARUK Lagged scatterplots for monthly bookings.")
+
+ggAcf(GLWST_training_m.ts,main = "GLWST monthly bookings Time Series ACF")
+ggAcf(MLKEP_training_m.ts,main = "MLKEP monthly bookings Time Series ACF")
+ggAcf(WARUK_training_m.ts,main = "WARUK monthly bookings Time Series ACF")
+```
+
+### Seasonal plot: monthly arrivals
+```{r}
+ggseasonplot(GLWST_training_m.ts , year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("arrivals") +
+  ggtitle("GLWST Seasonal plot: monthly arrivals")
+ggseasonplot(MLKEP_training_m.ts , year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("arrivals") +
+  ggtitle("MLKEP Seasonal plot: monthly arrivals")
+ggseasonplot(WARUK_training_m.ts , year.labels=TRUE, year.labels.left=TRUE) +
+  ylab("arrivals") +
+  ggtitle("WARUK Seasonal plot: monthly arrivals")
+
+```
+**Observations**
+
++ for hotel GLWST, the overlapped parts (May - October) show are similar demands for 2008 and 2009, however, for hotel MLKEP, compared to year 2008, there are higher demands in May, June, July and August in 2009 and lower demands in September and October in 2009
+
++ for hotel WARUK, the demands from May to October are lower in 2009 than 2008
+
+### plot by yearmonth by hotel
+```{r}
+p1 <- training_data %>% mutate(month = as.factor(month(month,label=TRUE))) %>%
+  group_by(hotel, month) %>% 
+  summarise(arrivals = mean(final_arrivals)) %>%
+  ggplot(aes(month, arrivals, fill = month)) +
+  geom_col() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=60, hjust=1, vjust=0.9)) +
+  labs(title = "Average bookings by month by hotel", x = "Month of the year", y = "Average arrivals") + 
+    facet_wrap(~ hotel)
+p1
+```
+**Observations**
+
++ there is less variations in hotel GLWST's monthly demands, January has the lowest bookings
+
++ for hotel MLKEP, January also has the lowest bookings, the most bookings are in September 2008 and June 2009
+
++ for hotel WARUK, January has the lowest bookings
+
+## plot by yearquater by hotel
+```{r}
+
+ggAcf(GLWST_training_q.ts)
+ggAcf(MLKEP_training_q.ts)
+ggAcf(WARUK_training_q.ts)
+
+p1 <- training_data %>% mutate(quarter = as.factor(quarter(quarter)))  %>%
+  group_by(hotel, quarter) %>% 
+  summarise(arrivals = mean(final_arrivals)) %>%
+  ggplot(aes(quarter, arrivals, fill = quarter)) +
+  geom_col() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(title = "Average bookings by quarter by hotel",x = "Quarter of the year", y = "Average arrivals") + 
+    facet_wrap(~ hotel)
+p1
+
+
+```
+**Observations**
+
++ there are white noise for the quater time series across three hotels
++ hotel GLWST has a steady demand throughout the year than the other two hotels
+
+# Boxplot and distribution hitsogram
+```{r}
+# booking days prior - box plot
+grid.arrange(
+box1 <- training_data  %>%  
+    ggplot(aes(x=hotel, y = days_prior)) + 
+     geom_boxplot(),
+
+box2 <- training_data  %>% 
+    ggplot(aes(x = DOW, y = days_prior)) + 
+     geom_boxplot() +  facet_grid(. ~ hotel) + coord_flip(),
+box3 <- training_data  %>% 
+    ggplot(aes(x = DOW, y = days_prior)) + 
+     geom_boxplot() +  facet_grid(. ~ hotel) + coord_flip(),
+
+
+ncol = 2)
+```
+
+## arrivals distribution by DOW by hotel
+```{r}
+
+grid.arrange (
+d1 <- GLWST_training_ts  %>%
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_GLWST") +
+  facet_grid(. ~ DOW),
+
+d2 <- MLKEP_training_ts %>%
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_MLKEP") +
+  facet_grid(. ~ DOW),
+
+d3 <- WARUK_training_ts %>% 
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_WARUK") +
+  facet_grid(. ~ DOW) ,
+ncol=1)
+```
+**Observations**
+
++ for hotel GLWST, the demands are more concentrated on Saturdays, this will yield a more accurate forecasting result
+
++ for the other hotels, demands are spread out by DOW
+
+## arrivals distribution by yearmonth by hotel
+```{r}
+
+grid.arrange (
+d1 <- GLWST_training_ts  %>% mutate(month = as.factor(month(month,label = TRUE)))%>% 
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=90, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_GLWST") +
+  facet_grid(. ~ month),
+
+d2 <- MLKEP_training_ts %>% mutate(month = as.factor(month(month,label = TRUE)))%>% 
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=90, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_MLKEP") +
+  facet_grid(. ~ month),
+
+d3 <- WARUK_training_ts %>% mutate(month = as.factor(month(month,label = TRUE)))%>% 
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=90, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_WARUK") +
+  facet_grid(. ~ month),
+ncol=1)
+```
+
+
+## arrivals distribution by yearquarter by hotel
+```{r}
+
+grid.arrange (
+d1 <- GLWST_training_ts  %>% mutate(quarter = as.factor(quarter)) %>% 
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_GLWST") +
+  facet_grid(. ~ quarter),
+
+d2 <- MLKEP_training_ts %>% mutate(quarter = as.factor(quarter)) %>% 
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_MLKEP") +
+  facet_grid(. ~ quarter),
+
+d3 <- WARUK_training_ts %>% mutate(quarter = as.factor(quarter)) %>%  
+  ggplot(aes(final_arrivals)) +
+  geom_histogram() +
+  theme(legend.position = "none", axis.text.x  = element_text(angle=45, hjust=1, vjust=0.9)) +
+  labs(x = "final_arrivals_WARUK") +
+  facet_grid(. ~ quarter) ,
+ncol=1)
+
+```
+
+# Advance forecast modeling
+
+##  traditional additive and mutliplicative modeling
+### in sample data set
+
+```{r}
+
+### model1: simple mean additive and multiplicative model by days prior
+training_dataset <- training_data %>%
+  mutate(month = month(month)) %>%
+  group_by(hotel,days_prior) %>% 
+  mutate (avg_add = mean(add),  # average remaining bookings by hotel and days prior
+          avg_rate = mean(rate), # average daily rate by hotel and days prior
+          fc_add = (cum_bookings + avg_add), # forecast using additive method by hotel and days prior
+          fc_mul = (cum_bookings/avg_rate)) %>% ungroup() %>%  #forecast using multiplicative method by hotel and days prior
+ 
+ ###  model2: simple mean additive and multiplicative model by days prior and month
+  group_by(hotel,days_prior,month) %>% 
+  mutate (avg_add_m = mean(add),  # average remaining bookings by hoteland days prior
+          avg_rate_m = mean(rate), # average monthly rate by hotel and days prior
+          fc_add_m = (cum_bookings + avg_add_m),  # forecast using additive method by hotel, days prior and month
+          fc_mul_m = (cum_bookings/avg_rate_m))  %>% ungroup() %>% # forecast using multiplicative method by hotel, days prior and month
+
+ ###  model3: simple mean additive and multiplicative model by days prior and DOW
+  group_by(hotel,days_prior,DOW) %>% 
+  mutate (avg_add_DOW = mean(add),   # average remaining bookings by hotel, days prior and DOW
+          avg_rate_DOW = mean(rate), # average rate by hotel, days prior and DOW
+          fc_add_DOW = (cum_bookings + avg_add_DOW),  # forecast using additive method by hotel, days prior and DOW
+          fc_mul_DOW = (cum_bookings/avg_rate_DOW)) %>% ungroup() %>% # forecast using multiplicative method by hotel, days prior and DOW
+
+ ###  model4: simple mean additive and multiplicative model by days prior , month and DOW
+  group_by(hotel,days_prior,month,DOW) %>% 
+  mutate (avg_add_mDOW = mean(add),   # average remaining bookings by hotel, days prior, month and DOW
+          avg_rate_mDOW = mean(rate), # average rate by hotel, days prior, month and DOW
+          fc_add_mDOW = (cum_bookings + avg_add_mDOW),  # forecast using additive method by hotel, days prior, month and DOW
+          fc_mul_mDOW = (cum_bookings/avg_rate_mDOW)) %>% ungroup() # forecast using multiplicative method by hotel, days prior, month and DOW
+```
+
+
+### out of sample data set
+```{r}
+### merge with the naive forecast data
+naive_data <- training_dataset %>% filter(days_prior == 0) %>%
+  select(hotel,stay_date,final_arrivals) %>% 
+  dplyr::rename(fc_naive= final_arrivals,naive_date = stay_date) 
+
+sta_data_add <- training_dataset %>% select(c(hotel,days_prior,avg_add))  %>% distinct()
+sta_data_mul <- training_dataset %>% select(c(hotel,days_prior,avg_rate))  %>% distinct()
+
+sta_data_add_m <- training_dataset %>% select(c(hotel,days_prior,month,avg_add_m))  %>% distinct()
+sta_data_mul_m <- training_dataset %>% select(c(hotel,days_prior,month,avg_rate_m))  %>% distinct()
+
+sta_data_add_DOW <- training_dataset %>% select(c(hotel,days_prior,DOW,avg_add_DOW))  %>% distinct()
+sta_data_mul_DOW <- training_dataset %>% select(c(hotel,days_prior,DOW,avg_rate_DOW))  %>% distinct()
+
+sta_data_add_mDOW <- training_dataset %>% select(c(hotel,days_prior,month,DOW,avg_add_mDOW))  %>% distinct()
+sta_data_mul_mDOW <- training_dataset %>% select(c(hotel,days_prior,month,DOW,avg_rate_mDOW))  %>% distinct()
+
+
+valid_dataset <- test_data %>% 
+  mutate(naive_date = stay_date - 364, month = month(month)) %>% # create a naive_date column for merge
+  left_join(naive_data,by = c("hotel","naive_date"),copy = TRUE)  %>% # find only stay date from training dateset that exist in test dataset
+  
+  # add average remaining bookings by hotel and days prior to valid dataset
+  left_join(sta_data_add,by= c("hotel","days_prior")) %>% 
+  # add average rate by hotel and days prior to valid dataset
+  left_join(sta_data_mul,by= c("hotel","days_prior")) %>% 
+  
+  # add average remaining bookings by hotel, days prior and month to valid dataset
+  left_join(sta_data_add_m,by= c("hotel","days_prior","month")) %>% 
+  # add average rate by hotel, days prior and month to valid dataset
+  left_join(sta_data_mul_m,by= c("hotel","days_prior","month")) %>% 
+  
+  # add average remaining bookings by hotel, days prior and DOW to valid dataset
+  left_join(sta_data_add_DOW,by= c("hotel","days_prior","DOW")) %>% 
+  # add average rate bookings by hotel, days prior and DOW to valid dataset
+  left_join(sta_data_mul_DOW,by= c("hotel","days_prior","DOW")) %>% 
+  
+  # add average remaining bookings by hotel, days prior, month and DOW to valid dataset
+  left_join(sta_data_add_mDOW,by= c("hotel","days_prior","month","DOW")) %>% 
+  # add average rate bookings by hotel, days prior, month and DOW to valid dataset
+  left_join(sta_data_mul_mDOW,by= c("hotel","days_prior","month","DOW")) %>% 
+
+  # forecast using additive and multiplicative method by hotel and days prior
+  mutate(fc_add = (cum_bookings + avg_add), fc_mul = (cum_bookings/avg_rate)) %>% 
+  # forecast using additive and multiplicative method by hotel, days prior and month
+  mutate(fc_add_m = (cum_bookings + avg_add_m), fc_mul_m = (cum_bookings/avg_rate_m))%>% 
+  # forecast using additive and multiplicative method by hotel, days prior and DOW
+  mutate(fc_add_DOW = (cum_bookings + avg_add_DOW), fc_mul_DOW = (cum_bookings/avg_rate_DOW)) %>% 
+  # forecast using additive and multiplicative method by hotel, days prior, month and DOW
+  mutate(fc_add_mDOW = (cum_bookings + avg_add_mDOW), fc_mul_mDOW = (cum_bookings/avg_rate_mDOW))
+```
+
+##  Calculate error for each booking in insample and outsample dataset respectively
+```{r}
+# in-sample absolute error
+fc_result_in <- training_dataset %>% filter(days_prior!=0) %>% # filter out final_day forecast
+  mutate(error_add= abs(final_arrivals - fc_add), # calculate absolute error for additive method daily bookings
+         error_mul = abs(final_arrivals - fc_mul), # calculate absolute error for muplicative method daily bookings
+         error_add_m = abs(final_arrivals - fc_add_m), # calculate absolute error for additive method monthly bookings
+         error_mul_m = abs(final_arrivals - fc_mul_m), # calculate absolute error for muplicative method monthly bookings
+         error_add_DOW = abs(final_arrivals - fc_add_DOW), # calculate absolute error for additive method bookings by DOW
+         error_mul_DOW = abs(final_arrivals - fc_mul_DOW), # calculate absolute error for muplicative method bookings by DOW
+         error_add_mDOW = abs(final_arrivals - fc_add_mDOW), # calculate absolute error for additive method bookings by month and DOW
+         error_mul_mDOW = abs(final_arrivals - fc_mul_mDOW)) # calculate absolute error for multiplicative method bookings by month and DOW
+
+# out-sample absolute error
+fc_result_out <- valid_dataset %>%  filter(days_prior!=0) %>%
+  mutate(error_naive = abs(final_arrivals - fc_naive), # calculate absolute error produced by naive forecast
+         error_add = abs(final_arrivals - fc_add),# calculate absolute error for additive method daily bookings
+         error_mul = abs(final_arrivals - fc_mul),# calculate absolute error for muplicative method daily bookings
+         error_add_m = abs(final_arrivals - fc_add_m),# calculate absolute error for additive method monthly bookings
+         error_mul_m = abs(final_arrivals - fc_mul_m),# calculate absolute error for muplicative method monthly bookings
+         error_add_DOW = abs(final_arrivals - fc_add_DOW),# calculate absolute error for additive method bookings by DOW
+         error_mul_DOW = abs(final_arrivals - fc_mul_DOW),# calculate absolute error for muplicative method bookings by DOW
+         error_add_mDOW = abs(final_arrivals - fc_add_mDOW),# calculate absolute error for additive method bookings by month and DOW
+         error_mul_mDOW = abs(final_arrivals - fc_mul_mDOW))# calculate absolute error for multiplicative method bookings by month and DOW
+```
+
+## Result of errors aggrigated by different factors for 9 different models
+### define error matrix results function
+```{r}
+###in sample
+error_result_matrix <- function(train_dataset,test_dataset,hotelname, factorname) { 
+  error_matrix_in <- train_dataset %>% 
+  group_by_(hotelname,factorname)  %>% 
+            # MAE error measurements
+  summarise(MAE_add = sum(error_add)/n(),
+            MAE_mul = sum(error_mul)/n(),
+            MAE_add_m = sum(error_add_m)/n(),
+            MAE_mul_m = sum(error_mul_m)/n(),
+            MAE_add_DOW = sum(error_add_DOW)/n(),
+            MAE_mul_DOW = sum(error_mul_DOW)/n(),
+            MAE_add_mDOW = sum(error_add_mDOW)/n(),
+            MAE_mul_mDOW = sum(error_mul_mDOW)/n(),
+            # MAPE error measurements
+            MAPE_add = sum((error_add)/final_arrivals)/n(),
+            MAPE_mul = sum((error_mul)/final_arrivals)/n(),
+            MAPE_add_m = sum((error_add_m)/final_arrivals)/n(),
+            MAPE_mul_m = sum((error_mul_m)/final_arrivals)/n(),
+            MAPE_add_DOW = sum((error_add_DOW)/final_arrivals)/n(),
+            MAPE_mul_DOW = sum((error_mul_DOW)/final_arrivals)/n(),
+            MAPE_add_mDOW = sum((error_add_mDOW)/final_arrivals)/n(),
+            MAPE_mul_mDOW = sum((error_mul_mDOW)/final_arrivals)/n()) 
+     
+  error_matrix_in[factorname] <- paste(error_matrix_in[[factorname]], "in",sep = "_")
+
+###out sample
+  error_matrix_out <- test_dataset %>% 
+    na.omit() %>%  # Drop NA forecast results in test data due to lack of reference in training data
+  group_by_(hotelname,factorname)  %>%
+           # MAE error measurements
+  summarise(MAE_naive = sum(error_naive)/n(),
+            MAE_add = sum(error_add)/n(),
+            MAE_mul = sum(error_mul)/n(),
+            MAE_add_m = sum(error_add_m)/n(),
+            MAE_mul_m = sum(error_mul_m)/n(),
+            MAE_add_DOW = sum(error_add_DOW)/n(),
+            MAE_mul_DOW = sum(error_mul_DOW)/n(),
+            MAE_add_mDOW = sum(error_add_mDOW)/n(),
+            MAE_mul_mDOW = sum(error_mul_mDOW)/n(),
+            # MAPE error measurements
+            MAPE_naive = sum((error_naive)/final_arrivals)/n(),
+            MAPE_add = sum((error_add)/final_arrivals)/n(),
+            MAPE_mul = sum((error_mul)/final_arrivals)/n(),
+            MAPE_add_m = sum((error_add_m)/final_arrivals)/n(),
+            MAPE_mul_m = sum((error_mul_m)/final_arrivals)/n(),
+            MAPE_add_DOW = sum((error_add_DOW)/final_arrivals)/n(),
+            MAPE_mul_DOW = sum((error_mul_DOW)/final_arrivals)/n(),
+            MAPE_add_mDOW = sum((error_add_mDOW)/final_arrivals)/n(),
+            MAPE_mul_mDOW = sum((error_mul_mDOW)/final_arrivals)/n(),
+            # MASE error measurements compared to naive model
+            MASE_add = sum(error_add)/sum(error_naive),
+            MASE_mul = sum(error_mul)/sum(error_naive),
+            MASE_add_m = sum(error_add_m)/sum(error_naive),
+            MASE_mul_m = sum(error_mul_m)/sum(error_naive),
+            MASE_add_DOW = sum(error_add_DOW)/sum(error_naive),
+            MASE_mul_DOW = sum(error_mul_DOW)/sum(error_naive),
+            MASE_add_mDOW = sum(error_add_mDOW)/sum(error_naive),
+            MASE_mul_mDOW = sum(error_mul_mDOW)/sum(error_naive)) 
+   
+  error_matrix_out[factorname] <- paste(error_matrix_out[[factorname]], "out",sep = "_")
+          
+  result<- rbind(error_matrix_in,error_matrix_out) 
+  return(result)
+}
+```
+
+### final result for 3 hotel for 9 models by 3 error measuremeants
+
+```{r}
+### aggreage result by hotel and days prior category
+
+result_daysprior <- error_result_matrix(fc_result_in,fc_result_out, "hotel","days_prior_c") 
+            
+result_daysprior
+
+### aggreage result by hotel and month
+
+result_month <- error_result_matrix(fc_result_in,fc_result_out, "hotel", "month")
+ 
+result_month
+
+### aggreage result by hotel and DOW
+
+
+result_DOW <- error_result_matrix(fc_result_in,fc_result_out,"hotel", "DOW")
+
+result_DOW
+```
+
+
+### details of results by 3 hotels
+#### GLWST
+```{r}
+result_DOW_G <- result_DOW %>% filter(hotel == "GLWST") %>% arrange(DOW) 
+
+result_DOW_G_MAE <- result_DOW_G[names(result_DOW_G) %like% "MAE" | names(result_DOW_G) == "DOW"]
+result_DOW_G_MAE
+result_DOW_G_MAPE <- result_DOW_G[names(result_DOW_G) %like% "MAPE" | names(result_DOW_G) == "DOW"]
+result_DOW_G_MAPE
+result_DOW_G_MASE <- result_DOW_G[names(result_DOW_G) %like% "MASE" | names(result_DOW_G) == "DOW"]
+result_DOW_G_MASE
+
+#Monthly
+result_month_G <- result_month %>% filter(hotel == "GLWST") %>% arrange(month) 
+
+result_month_G_MAE <- result_month_G[names(result_month_G) %like% "MAE" | names(result_month_G) == "month"]
+result_month_G_MAE
+result_month_G_MAPE <- result_month_G[names(result_month_G) %like% "MAPE" | names(result_month_G) == "month"]
+result_month_G_MAPE
+result_month_G_MASE <- result_month_G[names(result_month_G) %like% "MASE" | names(result_month_G) == "month"]
+result_month_G_MASE
+
+#Days prior categories
+result_daysprior_G <- result_daysprior %>% filter(hotel == "GLWST") %>% arrange(days_prior_c) 
+
+result_daysprior_G_MAE <- result_daysprior_G[names(result_daysprior_G) %like% "MAE" | names(result_daysprior_G) == "days_prior_c"]
+result_daysprior_G_MAE 
+result_daysprior_G_MAPE <- result_daysprior_G[names(result_daysprior_G) %like% "MAPE" | names(result_daysprior_G) == "days_prior_c"]
+result_daysprior_G_MAPE
+result_daysprior_G_MASE <- result_daysprior_G[names(result_daysprior_G) %like% "MASE" | names(result_daysprior_G) == "days_prior_c"]
+result_daysprior_G_MASE
+
+```
+
+#### MLKEP
+```{r}
+#DOW
+result_DOW_M <- result_DOW %>% filter(hotel == "MLKEP") %>% arrange(DOW) 
+
+result_DOW_M_MAE <- result_DOW_M[names(result_DOW_M) %like% "MAE" | names(result_DOW_M) == "DOW"]
+result_DOW_M_MAE
+result_DOW_M_MAPE <- result_DOW_M[names(result_DOW_M) %like% "MAPE" | names(result_DOW_M) == "DOW"]
+result_DOW_M_MAPE 
+result_DOW_M_MASE <- result_DOW_M[names(result_DOW_M) %like% "MASE" | names(result_DOW_M) == "DOW"]
+result_DOW_M_MASE
+#Monthly
+result_month_M <- result_month %>% filter(hotel == "MLKEP") %>% arrange(month) 
+
+result_month_M_MAE <- result_month_M[names(result_month_M) %like% "MAE" | names(result_month_M) == "month"]
+result_month_M_MAE
+result_month_M_MAPE <- result_month_M[names(result_month_M) %like% "MAPE" | names(result_month_M) == "month"]
+result_month_M_MAPE
+result_month_M_MASE <- result_month_M[names(result_month_M) %like% "MASE" | names(result_month_M) == "month"]
+result_month_M_MASE
+
+#Days prior categories
+result_daysprior_M <- result_daysprior %>% filter(hotel == "MLKEP") %>% arrange(days_prior_c) 
+
+result_daysprior_M_MAE <- result_daysprior_M[names(result_daysprior_M) %like% "MAE" | names(result_daysprior_M) == "days_prior_c"]
+result_daysprior_M_MAE
+result_daysprior_M_MAPE <- result_daysprior_M[names(result_daysprior_M) %like% "MAPE" | names(result_daysprior_M) == "days_prior_c"]
+result_daysprior_M_MAPE
+result_daysprior_M_MASE <- result_daysprior_M[names(result_daysprior_M) %like% "MASE" | names(result_daysprior_M) == "days_prior_c"]
+result_daysprior_M_MASE
+```
+
+#### WARUK
+```{r}
+#DOW
+result_DOW_W <- result_DOW %>% filter(hotel == "WARUK") %>% arrange(DOW) 
+
+result_DOW_W_MAE <- result_DOW_W[names(result_DOW_W) %like% "MAE" | names(result_DOW_W) == "DOW"]
+result_DOW_W_MAE 
+result_DOW_W_MAPE <- result_DOW_W[names(result_DOW_W) %like% "MAPE" | names(result_DOW_W) == "DOW"]
+result_DOW_W_MAPE
+result_DOW_W_MASE <- result_DOW_W[names(result_DOW_W) %like% "MASE" | names(result_DOW_W) == "DOW"]
+result_DOW_W_MASE
+
+#Monthly
+result_month_W <- result_month %>% filter(hotel == "WARUK") %>% arrange(month) 
+
+result_month_W_MAE <- result_month_W[names(result_month_W) %like% "MAE" | names(result_month_W) == "month"]
+result_month_W_MAPE <- result_month_W[names(result_month_W) %like% "MAPE" | names(result_month_W) == "month"]
+result_month_W_MASE <- result_month_W[names(result_month_W) %like% "MASE" | names(result_month_W) == "month"]
+
+#Days prior categories
+result_daysprior_W <- result_daysprior %>% filter(hotel == "WARUK") %>% arrange(days_prior_c) 
+
+result_daysprior_W_MAE <- result_daysprior_W[names(result_daysprior_W) %like% "MAE" | names(result_daysprior_W) == "days_prior_c"]
+result_daysprior_W_MAE
+result_daysprior_W_MAPE <- result_daysprior_W[names(result_daysprior_W) %like% "MAPE" | names(result_daysprior_W) == "days_prior_c"]
+result_daysprior_W_MAPE 
+result_daysprior_W_MASE <- result_daysprior_W[names(result_daysprior_W) %like% "MASE" | names(result_daysprior_W) == "days_prior_c"]
+result_daysprior_W_MASE
+
+
+
+```
+
+
+##  Visualize the accuracy for different models with different error measurements aggreated by different factors
+
+### GLWST
+#### DOW
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_DOW_G_MAE_g <- gather(result_DOW_G_MAE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+result_DOW_G_MAPE_g <- gather(result_DOW_G_MAPE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+result_DOW_G_MASE_g <- gather(result_DOW_G_MASE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by days prior across all 8 models 
+g1 <- result_DOW_G_MAE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MAE by Day of Week ") +
+    xlab("DOW") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by days prior across all 8 models 
+g2 <- result_DOW_G_MAPE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MAPE by Day of Week ") +
+    xlab("DOW") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by days prior across all 8 models 
+g3 <- result_DOW_G_MASE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MASE by Day of Week  ") +
+    xlab("DOW") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+#### monthly
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_month_G_MAE_g <- gather(result_month_G_MAE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+result_month_G_MAPE_g <- gather(result_month_G_MAPE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+result_month_G_MASE_g <- gather(result_month_G_MASE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by month across all 8 models 
+g1 <- result_month_G_MAE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MAE by month ") +
+    xlab("month") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by month across all 8 models 
+g2 <- result_month_G_MAPE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MAPE by month ") +
+    xlab("monthcategory") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by month across all 8 models 
+g3 <- result_month_G_MASE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MASE by month ") +
+    xlab("month") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+#### days prior category 
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_daysprior_G_MAE_g <- gather(result_daysprior_G_MAE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+result_daysprior_G_MAPE_g <- gather(result_daysprior_G_MAPE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+result_daysprior_G_MASE_g <- gather(result_daysprior_G_MASE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by days prior across all 8 models 
+g1 <- result_daysprior_G_MAE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MAE by days priors categories ") +
+    xlab("days prior category") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by days prior across all 8 models 
+g2 <- result_daysprior_G_MAPE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MAPE by days priors categories ") +
+    xlab("days prior category") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by days prior across all 8 models 
+g3 <- result_daysprior_G_MASE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("GLWST-Compare models with MASE by days priors categories ") +
+    xlab("days prior category") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+
+### MLKEP
+#### DOW
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_DOW_M_MAE_g <- gather(result_DOW_M_MAE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+result_DOW_M_MAPE_g <- gather(result_DOW_M_MAPE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+result_DOW_M_MASE_g <- gather(result_DOW_M_MASE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by days prior across all 8 models 
+g1 <- result_DOW_M_MAE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MAE by Day of Week ") +
+    xlab("DOW") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by days prior across all 8 models 
+g2 <- result_DOW_M_MAPE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MAPE by Day of Week ") +
+    xlab("DOW") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by days prior across all 8 models 
+g3 <- result_DOW_M_MASE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MASE by Day of Week  ") +
+    xlab("DOW") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+#### monthly
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_month_M_MAE_g <- gather(result_month_M_MAE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+result_month_M_MAPE_g <- gather(result_month_M_MAPE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+result_month_M_MASE_g <- gather(result_month_M_MASE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by month across all 8 models 
+g1 <- result_month_M_MAE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MAE by month ") +
+    xlab("month") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by month across all 8 models 
+g2 <- result_month_M_MAPE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MAPE by month ") +
+    xlab("monthcategory") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by month across all 8 models 
+g3 <- result_month_M_MASE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MASE by month ") +
+    xlab("month") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+#### days prior category 
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_daysprior_M_MAE_g <- gather(result_daysprior_M_MAE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+result_daysprior_M_MAPE_g <- gather(result_daysprior_M_MAPE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+result_daysprior_M_MASE_g <- gather(result_daysprior_M_MASE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by days prior across all 8 models 
+g1 <- result_daysprior_M_MAE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MAE by days priors categories ") +
+    xlab("days prior category") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by days prior across all 8 models 
+g2 <- result_daysprior_M_MAPE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MAPE by days priors categories ") +
+    xlab("days prior category") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by days prior across all 8 models 
+g3 <- result_daysprior_M_MASE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("MLKEP-Compare models with MASE by days priors categories ") +
+    xlab("days prior category") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+
+### WARUK
+#### DOW
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_DOW_W_MAE_g <- gather(result_DOW_W_MAE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+result_DOW_W_MAPE_g <- gather(result_DOW_W_MAPE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+result_DOW_W_MASE_g <- gather(result_DOW_W_MASE, models, error, c(-DOW)) %>%  
+           mutate( sample = ifelse(grepl('in', DOW),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by days prior across all 8 models 
+g1 <- result_DOW_W_MAE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MAE by Day of Week ") +
+    xlab("DOW") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by days prior across all 8 models 
+g2 <- result_DOW_W_MAPE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MAPE by Day of Week ") +
+    xlab("DOW") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by days prior across all 8 models 
+g3 <- result_DOW_W_MASE_g %>% 
+    ggplot(aes(x = DOW,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MASE by Day of Week  ") +
+    xlab("DOW") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+#### monthly
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_month_W_MAE_g <- gather(result_month_W_MAE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+result_month_W_MAPE_g <- gather(result_month_W_MAPE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+result_month_W_MASE_g <- gather(result_month_W_MASE, models, error, c(-month)) %>%  
+           mutate( sample = ifelse(grepl('in', month),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by month across all 8 models 
+g1 <- result_month_W_MAE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MAE by month ") +
+    xlab("month") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by month across all 8 models 
+g2 <- result_month_W_MAPE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MAPE by month ") +
+    xlab("monthcategory") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by month across all 8 models 
+g3 <- result_month_W_MASE_g %>% 
+    ggplot(aes(x = month,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MASE by month ") +
+    xlab("month") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+**Observations**
++ in general,the additive method grouped by month and day of week produce an overall best result among all models in the training dataset, however, the accuracy flunctuated by months.
++ the accuracy of the testdataset grouped by month is not as robust as the training dataset, in some month it would be more accurate if only consider the DOW with additive model.
+
+
+
+#### days prior category 
+```{r}
+# manipulate data by  sample, days prior group, model, and error
+result_daysprior_W_MAE_g <- gather(result_daysprior_W_MAE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+result_daysprior_W_MAPE_g <- gather(result_daysprior_W_MAPE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+result_daysprior_W_MASE_g <- gather(result_daysprior_W_MASE, models, error, c(-days_prior_c)) %>%  
+           mutate( sample = ifelse(grepl('in', days_prior_c),'in', 'out'
+                              ))
+
+# plot MAE errors for in and out samples by days prior across all 8 models 
+g1 <- result_daysprior_W_MAE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MAE by days priors categories ") +
+    xlab("days prior category") + ylab("MAE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g1
+
+# plot MAPE errors for in and out samples by days prior across all 8 models 
+g2 <- result_daysprior_W_MAPE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MAPE by days priors categories ") +
+    xlab("days prior category") + ylab("MAPE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g2
+
+# plot MASE errors for in and out samples by days prior across all 8 models 
+g3 <- result_daysprior_W_MASE_g %>% 
+    ggplot(aes(x = days_prior_c,y = error)) + 
+    geom_point(aes(color= models),size=1.5) +
+    ggtitle("WARUK-Compare models with MASE by days priors categories ") +
+    xlab("days prior category") + ylab("MASE errors")+
+    coord_flip() + 
+    scale_y_log10() +
+    facet_wrap(~ sample)
+g3
+
+```
+
+
+**Observations**
+
++ the addidtive model considering the factors of month and DOW forecast the best
++ among all the days prior categories, 1-7 forecast the best with the most robust accuracy across 8 models under both MAE and MAPE measurements
+
++ in general,the additive method grouped by month and day of week produce an overall best result among all models measured by MAE, MAPE, especailly for hotel GLWST, and the accuaracy varies by Day of Week, the forecast of Sat for GLWST seems perform the best.
+
++ the forecast resutl of the models by Day of week for out sample is not as robust as the in sample
++ the additive method grouped by month and day of week performs better for GLWST, while naive model is the best choice for some days of week for MLKEP
+
+# ETS modeling
+## Prepare ts modeling dataset
+```{r}
+# select column with interest
+full_dataset <- filled_data_full %>% filter(days_prior ==0) %>% select(hotel,stay_date,final_arrivals) %>% spread(hotel,final_arrivals) 
+
+# define ts frequency for snaive model
+naive_dataset_ts <- full_dataset %>% select(-stay_date)  %>% ts(frequency = 364)  # with 364 days seasonality
+
+# define ts frequency for exponetial smoothing model
+smoothing_dataset_ts <- full_dataset %>% select(-stay_date)  %>% ts(frequency = 7)  #  with weekly seasonality
+
+# assign timestamp variables
+fc_timestamp<-c("6m_Nov-Apr_in","6m_Nov-Apr_out","3m_Nov-Jan_in","3m_Nov-Jan_out","3m_Dec-Feb_in","3m_Dec-Feb_out","3m_Jan-Mar_in","3m_Jan-Mar_out","3m_Feb-Apr_in","3m_Feb-Apr_out","1m_Nov_in","1m_Nov_out","1m_Dec_in","1m_Dec_out","1m_Jan_in","1m_Jan_out","1m_Feb_in","1m_Feb_out","1m_Mar_in","1m_Mar_out","1m_Apr_in","1m_Apr_out")
+
+```
+
+## create model and functions
+### create naive model
+```{r}
+fc_snaive <- function(time1,time2,hotel_no,time3,time4) { 
+# snaive model
+k = abs(as.numeric(difftime(as.Date(time1), as.Date(time2), unit = "day"))) + 1
+k1= abs(as.numeric(difftime(as.Date(time3), as.Date(time4), unit = "day"))) + 1
+training_ts <- subset(naive_dataset_ts,end=k)
+fc_ts <- snaive(training_ts[,hotel_no], h = k1) 
+return(fc_ts) 
+}
+
+```
+
+### create ses model
+```{r}
+fc_ses <- function(time1,time2,hotel_no,time3,time4) { 
+  # ses model
+  k = abs(as.numeric(difftime(as.Date(time1), as.Date(time2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(time3), as.Date(time4), unit = "day"))) + 1
+  training_ts <- subset(smoothing_dataset_ts,end=k)
+  fc_ts <- ses(training_ts[,hotel_no], h = k1) 
+  
+  return(fc_ts) 
+}
+
+```
+
+
+
+### create holt model
+```{r}
+
+fc_holt <- function(time1,time2,hotel_no,time3,time4) { 
+  # holt model
+  k = abs(as.numeric(difftime(as.Date(time1), as.Date(time2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(time3), as.Date(time4), unit = "day"))) + 1
+  training_ts <- subset(smoothing_dataset_ts,end=k)
+  fc_ts <- holt(training_ts[,hotel_no], h = k1) 
+  
+  return(fc_ts)
+}
+```
+
+### create Holt-Winters model
+```{r}
+fc_hw <- function(time1,time2,hotel_no,time3,time4,season) { 
+  # holt-winters model
+  k = abs(as.numeric(difftime(as.Date(time1), as.Date(time2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(time3), as.Date(time4), unit = "day"))) + 1
+  training_ts <- subset(smoothing_dataset_ts,end=k)
+  fc_ts<- hw(training_ts[,hotel_no],h=k1,seasonal=season,damped = TRUE)
+  
+  return(fc_ts) 
+}
+```
+
+
+### create forecast result function
+```{r row.print=20}
+fc_result <- function(hotel_no) {
+  
+# snaive forecast result
+## six-month forecasting errors
+six_month_snaive <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") %>% accuracy(naive_dataset_ts[,hotel_no])
+
+## three-month forecasting errors
+three_month_1_snaive <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") %>% accuracy(naive_dataset_ts[,hotel_no])
+three_month_2_snaive <-fc_snaive("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28") %>% accuracy(naive_dataset_ts[,hotel_no])
+three_month_3_snaive <-fc_snaive("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31") %>% accuracy(naive_dataset_ts[,hotel_no])
+three_month_4_snaive <-fc_snaive("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") %>% accuracy(naive_dataset_ts[,hotel_no])
+
+## one-month forecasting errors
+one_month_1_snaive <- fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") %>% accuracy(naive_dataset_ts[,hotel_no])
+one_month_2_snaive <- fc_snaive("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") %>% accuracy(naive_dataset_ts[,hotel_no])
+one_month_3_snaive <- fc_snaive("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31") %>% accuracy(naive_dataset_ts[,hotel_no])
+one_month_4_snaive <- fc_snaive("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28") %>% accuracy(naive_dataset_ts[,hotel_no])
+one_month_5_snaive <- fc_snaive("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") %>% accuracy(naive_dataset_ts[,hotel_no])
+one_month_6_snaive <- fc_snaive("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") %>% accuracy(naive_dataset_ts[,hotel_no])
+
+
+
+# ses forecast result
+## six-month forecasting errors
+six_month_ses <-fc_ses("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+## three-month forecasting errors
+three_month_1_ses <-fc_ses("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_2_ses <-fc_ses("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_3_ses <-fc_ses("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_4_ses <-fc_ses("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+## one-month forecasting errors
+one_month_1_ses <-fc_ses("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_2_ses <-fc_ses("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_3_ses <-fc_ses("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_4_ses <-fc_ses("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_5_ses <-fc_ses("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_6_ses <-fc_ses("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+
+
+# holt forecast result
+## six-month forecasting errors
+six_month_holt <-fc_holt("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+## three-month forecasting errors
+three_month_1_holt <-fc_holt("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_2_holt <-fc_holt("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_3_holt <-fc_holt("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_4_holt <-fc_holt("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+## one-month forecasting errors
+one_month_1_holt <-fc_holt("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_2_holt <-fc_holt("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_3_holt <-fc_holt("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_4_holt <-fc_holt("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-02-28") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_5_holt <-fc_holt("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_6_holt <-fc_holt("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+
+
+# hw - additive
+# six-month forecasting errors
+six_month_hw_a <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30","additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+# three-month forecasting errors
+three_month_1_hw_a <- fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_2_hw_a <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_3_hw_a <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_4_hw_a <- fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+# one-month forecasting errors
+one_month_1_hw_a <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_2_hw_a<-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_3_hw_a <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_4_hw_a <-fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-02-28", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_5_hw_a <-fc_hw("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_6_hw_a <-fc_hw("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30", "additive") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+
+# hw - multiplicative
+# six-month forecasting errors
+six_month_hw_m <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30","multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+# three-month forecasting errors
+three_month_1_hw_m  <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_2_hw_m  <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_3_hw_m  <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2009-01-01","2010-03-31", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+three_month_4_hw_m  <-fc_hw("2008-05-01","2010-01-30",hotel_no,"2010-02-01","2010-04-30", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+# one-month forecasting errors
+one_month_1_hw_m  <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_2_hw_m  <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_3_hw_m  <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_4_hw_m  <-fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-02-28", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_5_hw_m  <-fc_hw("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+one_month_6_hw_m  <-fc_hw("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30", "multiplicative") %>% accuracy(smoothing_dataset_ts[,hotel_no])
+
+
+
+# combine all the result as matrix
+naive_result <- rbind(six_month_snaive,three_month_1_snaive,three_month_2_snaive,three_month_3_snaive,three_month_4_snaive,one_month_1_snaive,one_month_2_snaive,one_month_3_snaive,one_month_4_snaive,one_month_5_snaive,one_month_6_snaive)
+ses_result<-rbind(six_month_ses,three_month_1_ses,three_month_2_ses,three_month_3_ses,three_month_4_ses,one_month_1_ses,one_month_2_ses,one_month_3_ses,one_month_4_ses,one_month_5_ses,one_month_6_ses)
+holt_result<-rbind(six_month_holt,three_month_1_holt,three_month_2_holt,three_month_3_holt,three_month_4_holt,one_month_1_holt,one_month_2_holt,one_month_3_holt,one_month_4_holt,one_month_5_holt,one_month_6_holt)
+hw_add_result<-rbind(six_month_hw_a ,three_month_1_hw_a ,three_month_2_hw_a ,three_month_3_hw_a,three_month_4_hw_a,one_month_1_hw_a ,one_month_2_hw_a ,one_month_3_hw_a ,one_month_4_hw_a ,one_month_5_hw_a ,one_month_6_hw_a )
+hw_mul_result<-rbind(six_month_hw_m,three_month_1_hw_m,three_month_2_hw_m,three_month_3_hw_m,three_month_4_hw_m,one_month_1_hw_m,one_month_2_hw_m,one_month_3_hw_m,one_month_4_hw_m,one_month_5_hw_m,one_month_6_hw_m)
+
+
+
+# transfer to data frame and only keep test data result and MAE and MAPE
+naive_result.df <- as.data.frame(naive_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0|row_number()%%2==1)
+ses_result.df<- as.data.frame(ses_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0 |row_number()%%2==1)
+holt_result.df<- as.data.frame(holt_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0 |row_number()%%2==1)
+hw_add_result.df<- as.data.frame(hw_add_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0 |row_number()%%2==1)
+hw_mul_result.df<- as.data.frame(hw_mul_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0 |row_number()%%2==1)
+
+
+
+# rename the row name
+
+naive_result<-data.frame( forecast_period = fc_timestamp, naive_result.df)
+ses_result<-data.frame( forecast_period  =  fc_timestamp, ses_result.df)
+holt_result<-data.frame( forecast_period  =  fc_timestamp, holt_result.df)
+hw_add_result<-data.frame( forecast_period =  fc_timestamp, hw_add_result.df)
+hw_mul_result<-data.frame( forecast_period =  fc_timestamp, hw_mul_result.df)
+
+
+# calculate MASE
+ses_result <- ses_result %>% mutate(MASE=as.matrix(ses_result["MAE"])/as.matrix(naive_result["MAE"]))
+holt_result <- holt_result %>% mutate(MASE=as.matrix(holt_result["MAE"])/as.matrix(naive_result["MAE"]))
+hw_add_result <- hw_add_result %>% mutate(MASE=as.matrix(hw_add_result["MAE"])/as.matrix(naive_result["MAE"]))
+hw_mul_result <- hw_mul_result %>% mutate(MASE=as.matrix(hw_mul_result["MAE"])/as.matrix(naive_result["MAE"]))
+
+# mutate MAPE as decimal number
+ses_result <- ses_result %>% mutate(MAPE = MAPE/100)
+holt_result <- holt_result %>% mutate(MAPE =  MAPE/100)
+hw_add_result <- hw_add_result %>% mutate(MAPE =  MAPE/100)
+hw_mul_result <- hw_mul_result %>% mutate(MAPE =  MAPE/100)
+
+# remove MASE for in-sample
+ses_result <- ses_result %>% mutate(MASE = ifelse(row_number() %%2 ==1,"NaN",MASE))
+holt_result <- holt_result %>% mutate(MASE = ifelse(row_number() %%2 ==1,"NaN",MASE))
+hw_add_result <- hw_add_result %>% mutate(MASE = ifelse(row_number() %%2 ==1,"NaN",MASE))
+hw_mul_result <- hw_mul_result %>% mutate(MASE = ifelse(row_number() %%2 ==1,"NaN",MASE))
+
+return(list(naive = naive_result,ses = ses_result,holt = holt_result,hw_add = hw_add_result,hw_mul = hw_mul_result))
+}
+
+fc_result(1)
+
+```
+#### create forecast result across model
+```{r}
+fc_result_across <- function(hotel_no) {k<-fc_result(hotel_no) 
+  MAE <-data.frame(forecast_period= k[["naive"]][,1],ses=k[["ses"]][,2],holt=k[["holt"]][,2],hw_add=k[["hw_add"]][,2],hw_mul=k[["hw_mul"]][,2])
+  
+  MAPE <-data.frame(forecast_period  =k[["naive"]][,1],ses=k[["ses"]][,3],holt=k[["holt"]][,3],hw_add=k[["hw_add"]][,3],hw_mul=k[["hw_mul"]][,3])
+  
+  MASE <- data.frame( forecast_period =k[["naive"]][,1],ses=k[["ses"]][,4],holt=k[["holt"]][,4],hw_add=k[["hw_add"]][,4],hw_mul=k[["hw_mul"]][,4])
+  
+  return(list(MAE=MAE, MAPE=MAPE,MASE=MASE))
+}
+```
+
+## model restult
+### GLWST
+
+#### forecast accuracy by models
+```{r rows.print=20}
+fc_result(1)
+```
+#### forecast accuracy across models
+```{r rows.print=20}
+fc_result_across(1)
+
+
+```
+
+
+#### save accuracy metrics
+```{r rows.print=20}
+fc_timestamp_out<-c("6m_Nov-Apr_out","3m_Nov-Jan_out","3m_Dec-Feb_out","3m_Jan-Mar_out","3m_Feb-Apr_out","1m_Nov_out","1m_Dec_out","1m_Jan_out","1m_Feb_out","1m_Mar_out","1m_Apr_out") 
+
+fc_result_across(1)
+es_G_MAE <- data.frame(fc_result_across(1)[1])
+
+es_G_MAPE<- data.frame(fc_result_across(1)[2])
+
+
+es_G_MASE<- data.frame(fc_result_across(1)[3]) %>% filter(row_number()%%2 ==0)
+es_G_MASE<-txtRound(es_G_MASE[,-1],2)
+es_G_MASE <- data.frame(forecast_period=fc_timestamp_out,es_G_MASE) 
+htmlTable(es_G_MASE)
+
+```
+
+
++ the MASE show that the ses forecasting are either worse or comparable with naive forecasting,Except for 3 one-month forecasting yield better results than naive forecast, others are all worse
++ the one month forecasting is slight better than three and six months, especially when we use more recent data to forecast, the result is more accurate
++ the one month (2009 November) forecast using 2008 May to 2009 October data yields the best result
++ the one month forecasting for Dec and Jan is pretty bad, much worse than the naive model
+
+
+
+### MLKEP
+
+#### forecast accuracy by models
+```{r rows.print=20}
+fc_result(2)
+```
+```{r rows.print=20}
+fc_result_across(2)
+```
+
+#### save accuracy metrics
+```{r rows.print=20}
+fc_result_across(2)
+es_M_MAE <- data.frame(fc_result_across(2)[1])
+
+
+
+es_M_MAPE<- data.frame(fc_result_across(2)[2])
+
+
+es_M_MASE<- data.frame(fc_result_across(2)[3]) %>% filter(row_number()%%2 ==0)
+es_M_MASE<-txtRound(es_M_MASE[,-1],2)
+es_M_MASE <- data.frame(forecast_period=fc_timestamp_out,es_M_MASE) 
+htmlTable(es_M_MASE)
+
+
+
+```
+
+
+
+
+**Observations**
+
++ the ets method for forecasting of this hotel is very bad, most of them are worse than the naive forecast except for 2010 Feb
+
+
+### WARUK
+
+### forecast accuracy by models
+```{r rows.print=20}
+fc_result(3)
+```
+
+### forecast accuracy across models
+```{r rows.print=25}
+fc_result_across(3)
+```
+
+
+#### save accuracy metrics
+```{r rows.print=20}
+fc_timestamp_out_order<-c("1m_Nov_out","1m_Dec_out","1m_Jan_out","1m_Feb_out","1m_Mar_out","1m_Apr_out","3m_Nov-Jan_out","3m_Dec-Feb_out","3m_Jan-Mar_out","3m_Feb-Apr_out","6m_Nov-Apr_out")
+
+fc_result_across(3)
+es_W_MAE <- data.frame(fc_result_across(3)[1])
+
+
+es_W_MAPE<- data.frame(fc_result_across(3)[2])
+
+
+es_W_MASE<- data.frame(fc_result_across(3)[3]) %>% filter(row_number()%%2 ==0)
+es_W_MASE<-txtRound(es_W_MASE[,-1],2)
+es_W_MASE <- data.frame(forecast_period=fc_timestamp_out,es_W_MASE) 
+htmlTable(es_W_MASE)
+
+
+
+```
+
+
+
+**Observations**
+
++ Generally, the holt Winters model with additive and multive seasonality method did better job then the ses and holt model.
+
++ Holt Winter is the best model for hotel WARUK with only 3 forecasts that are greater than 1 which is worse than naive forecast
+
++ the one forecast demand for 2010 Dec and Jan have the lowest MASE
+
++ this model yields comparable results to additive method
+
+#### alpha from ses models
+```{r}
+ses_alpha <- function(hotel_no) {
+## six-month forecasting errors
+six_month_ses <-fc_ses("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") 
+
+## three-month forecasting errors
+three_month_1_ses <-fc_ses("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") 
+three_month_2_ses <-fc_ses("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28") 
+three_month_3_ses <-fc_ses("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31") 
+three_month_4_ses <-fc_ses("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") 
+
+## one-month forecasting errors
+one_month_1_ses <-fc_ses("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") 
+one_month_2_ses <-fc_ses("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") 
+one_month_3_ses <-fc_ses("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31")  
+one_month_4_ses <-fc_ses("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28")  
+one_month_5_ses <-fc_ses("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") 
+one_month_6_ses <-fc_ses("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") 
+
+ses_alpha<-rbind(round(six_month_ses$model$par[1],3),round(three_month_1_ses$model$par[1],3),round(three_month_2_ses$model$par[1],3),round(three_month_3_ses$model$par[1],3),round(three_month_4_ses$model$par[1],3),round(one_month_1_ses$model$par[1],3),round(one_month_2_ses$model$par[1],3),round(one_month_3_ses$model$par[1],3),round(one_month_4_ses$model$par[1],3),round(one_month_5_ses$model$par[1],3),round(one_month_6_ses$model$par[1],3))
+
+ return(ses_alpha)
+}
+
+ses_alpha(1)
+ses_alpha(2)
+ses_alpha(3)
+ses_alpha_3.df<- data.frame(alpha_G =ses_alpha(1)[,1], alpha_M =ses_alpha(2)[,1],alpha_W=ses_alpha(3)[,1]) 
+
+ses_alpha_3 <-data.frame(forecast_period = fc_timestamp_out, ses_alpha_3.df)
+htmlTable(ses_alpha_3)
+
+
+
+```
+
+
+#### alpha and beta from holt models
+```{r}
+holt_alphabeta<- function(hotel_no) {
+## six-month forecasting errors
+six_month_holt <-fc_holt("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") 
+
+## three-month forecasting errors
+three_month_1_holt <-fc_holt("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") 
+three_month_2_holt <-fc_holt("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28") 
+three_month_3_holt  <-fc_holt("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31") 
+three_month_4_holt  <-fc_holt("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") 
+
+## one-month forecasting errors
+one_month_1_holt  <-fc_holt("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") 
+one_month_2_holt  <-fc_holt("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") 
+one_month_3_holt  <-fc_holt("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31")  
+one_month_4_holt  <-fc_holt("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28")  
+one_month_5_holt <-fc_holt("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") 
+one_month_6_holt  <-fc_holt("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") 
+
+holt_alphabeta<-rbind(round(six_month_holt$model$par[1:2],4),round(three_month_1_holt$model$par[1:2],4),round(three_month_2_holt$model$par[1:2],4),round(three_month_3_holt$model$par[1:2],4),round(three_month_4_holt$model$par[1:2],4),round(one_month_1_holt$model$par[1:2],4),round(one_month_2_holt$model$par[1:2],4),round(one_month_3_holt$model$par[1:2],4),round(one_month_4_holt$model$par[1:2],4),round(one_month_5_holt$model$par[1:2],4),round(one_month_6_holt$model$par[1:2],4))
+
+ return(holt_alphabeta)
+}
+
+holt_alphabeta(1)
+holt_alphabeta(2)
+holt_alphabeta(3)
+
+holt_alphabeta_3.df <- data.frame(alpha__G =holt_alphabeta(1)[,1], beta__G =holt_alphabeta(1)[,2],alpha_M =holt_alphabeta(2)[,1],beta_M =holt_alphabeta(2)[,2],alpha_W=holt_alphabeta(3)[,1],beta_W=holt_alphabeta(3)[,2]) 
+holt_alphabeta_3 <-data.frame(forecast_period = fc_timestamp_out, holt_alphabeta_3.df)
+htmlTable(holt_alphabeta_3 )
+png(filename="holt_alphabeta_3.png")
+
+
+```
+
+
+
+
+#### alpha, beta and gamma from holt-winters models (additive)
+```{r}
+hw_add_abg<- function(hotel_no) {
+## six-month forecasting errors
+six_month_hw <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30","additive") 
+
+## three-month forecasting errors
+three_month_1_hw <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31","additive") 
+three_month_2_hw <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28","additive") 
+three_month_3_hw  <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31","additive") 
+three_month_4_hw  <-fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30","additive") 
+
+## one-month forecasting errors
+one_month_1_hw  <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30","additive") 
+one_month_2_hw  <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31","additive") 
+one_month_3_hw <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31","additive")  
+one_month_4_hw  <-fc_hw("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28","additive")  
+one_month_5_hw <-fc_hw("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31","additive") 
+one_month_6_hw  <-fc_hw("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30","additive") 
+
+hw_add_abg<-rbind(round(six_month_hw$model$par[1:3],4),round(three_month_1_hw$model$par[1:3],4),round(three_month_2_hw$model$par[1:3],4),round(three_month_3_hw$model$par[1:3],4),round(three_month_4_hw$model$par[1:3],4),round(one_month_1_hw$model$par[1:3],4),round(one_month_2_hw$model$par[1:3],4),round(one_month_3_hw$model$par[1:3],4),round(one_month_4_hw$model$par[1:3],4),round(one_month_5_hw$model$par[1:3],4),round(one_month_6_hw$model$par[1:3],4))
+
+ return(hw_add_abg)
+}
+
+hw_add_abg(1)
+hw_add_abg(2)
+hw_add_abg(3)
+
+hw_add_abg_3.df <- data.frame(alpha_G =hw_add_abg(1)[,1], beta_G =hw_add_abg(1)[,2],gamma_G =hw_add_abg(1)[,3],alpha_M =hw_add_abg(2)[,1],beta_M =hw_add_abg(2)[,2],gamma_M =hw_add_abg(2)[,3],alpha_W=hw_add_abg(3)[,1],beta_W=hw_add_abg(3)[,2],gamma_W=hw_add_abg(3)[,3]) 
+
+hw_add_abg_3 <-data.frame(forecast_period = fc_timestamp_out, hw_add_abg_3.df)
+htmlTable(hw_add_abg_3)
+
+
+
+```
+
+
+
+#### alpha, beta and gamma from holt-winters models (multiplicative)
+```{r}
+hw_mul_abg<- function(hotel_no) {
+## six-month forecasting errors
+six_month_hw <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30","multiplicative") 
+
+## three-month forecasting errors
+three_month_1_hw <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31","multiplicative") 
+three_month_2_hw <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28","multiplicative") 
+three_month_3_hw  <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31","multiplicative") 
+three_month_4_hw  <-fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30","multiplicative") 
+
+## one-month forecasting errors
+one_month_1_hw  <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30","multiplicative") 
+one_month_2_hw  <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31","multiplicative") 
+one_month_3_hw <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31","multiplicative")  
+one_month_4_hw  <-fc_hw("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28","multiplicative")  
+one_month_5_hw <-fc_hw("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31","multiplicative") 
+one_month_6_hw  <-fc_hw("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30","multiplicative") 
+
+hw_mul_abg<-rbind(round(six_month_hw$model$par[1:3],4),round(three_month_1_hw$model$par[1:3],4),round(three_month_2_hw$model$par[1:3],4),round(three_month_3_hw$model$par[1:3],4),round(three_month_4_hw$model$par[1:3],4),round(one_month_1_hw$model$par[1:3],4),round(one_month_2_hw$model$par[1:3],4),round(one_month_3_hw$model$par[1:3],4),round(one_month_4_hw$model$par[1:3],4),round(one_month_5_hw$model$par[1:3],4),round(one_month_6_hw$model$par[1:3],4))
+
+ return(hw_mul_abg)
+}
+
+hw_mul_abg(1)
+hw_mul_abg(2)
+hw_mul_abg(3)
+
+hw_mul_abg_3 <- data.frame(alpha_G =hw_mul_abg(1)[,1], beta_G =hw_mul_abg(1)[,2],gamma_G =hw_mul_abg(1)[,3],alpha_M =hw_mul_abg(2)[,1],beta_M =hw_mul_abg(2)[,2],gamma_M =hw_mul_abg(2)[,3],alpha_W=hw_mul_abg(3)[,1],beta_W=hw_mul_abg(3)[,2],gamma_W=hw_mul_abg(3)[,3]) 
+hw_mul_abg_3
+
+hw_mul_abg_3 <-data.frame(forecast_period = fc_timestamp_out, hw_mul_abg_3)
+htmlTable(hw_mul_abg_3)
+
+
+```
+
+
+
+# ARIMA and SARIMA model
+
+## transform dataset
+```{r}
+full_dataset_ts <- full_dataset %>% select(-stay_date)  %>% ts(frequency = 7)
+in_sample_dataset_ts <- subset(full_dataset_ts,end = 549)
+out_sample_dataset_ts <- subset(full_dataset_ts,start = 550)
+
+```
+
+## create model and functions
+### create auto ARIMA model fitting function
+```{r}
+# create auto ARIMA model fitting function
+fc_auto.arima <- function(hotel_no) 
+  {lambda <- BoxCox.lambda(in_sample_dataset_ts[,hotel_no])
+fc_ts <- auto.arima(in_sample_dataset_ts[,hotel_no],lambda =lambda)
+return(fc_ts) 
+}
+```
+
+### create ARIMA model fitting function
+```{r}
+# create ARIMA model fitting function
+fc_Arima <- function(hotel_no,p,d,q) 
+  {lambda <- BoxCox.lambda(in_sample_dataset_ts[,hotel_no])
+fc_ts <- Arima(in_sample_dataset_ts[,hotel_no],lambda =lambda,order = c(p,d,q))
+return(fc_ts) 
+}
+```
+
+### create Seasonal ARIMA model fitting function
+```{r}
+# create Seasonal ARIMA model fitting function
+fc_SArima <- function(hotel_no,p,d,q,P,D,Q) 
+  {lambda <- BoxCox.lambda(in_sample_dataset_ts[,hotel_no])
+fc_ts <- Arima(in_sample_dataset_ts[,hotel_no],lambda =lambda,order = c(p,d,q),seasonal=c(P,D,Q))
+return(fc_ts) 
+}
+```
+
+
+### create Arima forecast error result function
+```{r}
+# create Arima forecast result function
+fc_Arima_error <- function(hotel_no,p,d,q) { 
+
+# create snaive forecast function
+fc_snaive <- function(time1,time2,hotel_no,time3,time4) { k = abs(as.numeric(difftime(as.Date(time1), as.Date(time2), unit = "day"))) + 1
+k1= abs(as.numeric(difftime(as.Date(time3), as.Date(time4), unit = "day"))) + 1
+training_ts <- subset(naive_dataset_ts,end=k)
+fc_ts <- snaive(training_ts[,hotel_no], h = k1) %>% accuracy(naive_dataset_ts[,hotel_no]) 
+return(fc_ts) 
+}
+
+# create ARIMA forecast function
+fc_Arima <- function(hotel_no,traintime1,traintime2,testtime1,testtime2,p,d,q) { k = abs(as.numeric(difftime(as.Date(traintime1), as.Date(traintime2), unit = "day"))) + 1
+k1= abs(as.numeric(difftime(as.Date(testtime1), as.Date(testtime2), unit = "day"))) + 1
+training_ts <- subset(full_dataset_ts,end=k)
+lambda <- BoxCox.lambda(training_ts[,hotel_no])
+fc_ts <- Arima(training_ts [,hotel_no],lambda = lambda,order=c(p,d,q),method="CSS") %>% forecast(h = k1) %>% accuracy(full_dataset_ts[,hotel_no])
+return(fc_ts) 
+}
+
+# naive model forecast
+## six-month forecasting errors
+six_month <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") 
+
+## three-month forecasting errors
+three_month_1 <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") 
+three_month_2  <-fc_snaive("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28")
+three_month_3  <-fc_snaive("2008-05-01","2009-12-31",hotel_no,"2009-01-01","2010-03-31")
+three_month_4 <-fc_snaive("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") 
+
+## one-month forecasting errors
+one_month_1 <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") 
+one_month_2<- fc_snaive("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") 
+one_month_3<-fc_snaive("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31") 
+one_month_4<-fc_snaive("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28") 
+one_month_5<-fc_snaive("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") 
+one_month_6<-fc_snaive("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") 
+
+# combine all the matrix
+naive_result<-rbind(six_month,three_month_1,three_month_2,three_month_3,three_month_4,one_month_1,one_month_2,one_month_3,one_month_4,one_month_5,one_month_6)
+# transfer to data frame and only keep test data result and MAE and MAPE
+naive_result.df<- as.data.frame(naive_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0 |row_number()%%2 ==1)
+# rename the row name
+naive_result<-data.frame(forecast_period= fc_timestamp, naive_result.df)
+
+# Arima model forecast
+## six-month forecasting errors
+
+six_month_Arima <- fc_Arima(hotel_no, "2008-05-01","2009-10-31","2009-11-01","2010-04-30", p,d,q) 
+
+## three-month forecasting errors
+three_month_1_Arima <-fc_Arima(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2010-01-31",p,d,q)  
+
+three_month_2_Arima <-fc_Arima(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2010-02-28",p,d,q)   
+
+three_month_3_Arima <-fc_Arima(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-03-31",p,d,q)   
+
+three_month_4_Arima <-fc_Arima(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-04-30",p,d,q)   
+
+## one-month forecasting errors
+one_month_1_Arima <-fc_Arima(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2009-11-30",p,d,q)  
+one_month_2_Arima <-fc_Arima(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2009-12-31",p,d,q)  
+one_month_3_Arima <-fc_Arima(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-01-31",p,d,q)  
+one_month_4_Arima <-fc_Arima(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-02-28",p,d,q)  
+one_month_5_Arima <-fc_Arima(hotel_no,"2008-05-01","2010-02-28","2010-03-01","2010-03-31",p,d,q)  
+one_month_6_Arima <-fc_Arima(hotel_no,"2008-05-01","2010-03-31","2010-04-01","2010-04-30",p,d,q)  
+
+# combine all the matrix
+arima_result <- rbind(six_month_Arima,three_month_1_Arima,three_month_2_Arima,three_month_3_Arima,three_month_4_Arima,one_month_1_Arima,one_month_2_Arima,one_month_3_Arima,one_month_4_Arima,one_month_5_Arima,one_month_6_Arima)
+# transfer to data frame and only keep MAE and MAPE
+arima_result.df<- as.data.frame(arima_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0|row_number()%%2==1)
+# rename the row name
+arima_result <- data.frame(forecast_period= fc_timestamp, arima_result.df)
+# mutate MAPE as decimal number
+arima_result <- arima_result %>% mutate(MAPE= MAPE/100)
+# calculate MASE
+arima_result  <- arima_result %>%mutate(MASE = as.matrix(arima_result["MAE"])/as.matrix(naive_result["MAE"]))
+# remove MASE for in-sample
+arima_result  <- arima_result  %>% mutate(MASE = ifelse(row_number() %%2 ==1,"NaN",MASE))
+
+return(arima_result)
+}
+
+```
+
+### create SArima forecast error result function
+```{r}
+#create Sarima forecast result function
+fc_SArima_error <- function(hotel_no,p,d,q,P,D,Q) { 
+
+# create snaive forecast function
+fc_snaive <- function(time1,time2,hotel_no,time3,time4) { 
+  k = abs(as.numeric(difftime(as.Date(time1), as.Date(time2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(time3), as.Date(time4), unit = "day"))) + 1
+  training_ts <- subset(naive_dataset_ts,end = k)
+  fc_ts <- snaive(training_ts[,hotel_no], h = k1) %>% accuracy(naive_dataset_ts[,hotel_no]) 
+  return(fc_ts) 
+}
+
+# create seasonal ARIMA forecast function
+fc_Sarima <- function(hotel_no,traintime1,traintime2,testtime1,testtime2,p,d,q,P,D,Q) { 
+  k = abs(as.numeric(difftime(as.Date(traintime1), as.Date(traintime2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(testtime1), as.Date(testtime2), unit = "day"))) + 1
+  training_ts <- subset(full_dataset_ts,end = k)
+  lambda <- BoxCox.lambda(training_ts)
+  fc_ts <- Arima(training_ts [,hotel_no],lambda = lambda,order=c(p,d,q),seasonal = c(P,D,Q),method ="CSS") %>% forecast(h = k1) %>% accuracy(full_dataset_ts[,hotel_no])
+return(fc_ts) 
+}
+
+# naive model forecast
+# six-month forecasting errors
+six_month <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30") 
+
+# three-month forecasting errors
+three_month_1 <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31") 
+three_month_2 <-fc_snaive("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28")  
+three_month_3 <-fc_snaive("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31") 
+three_month_4 <-fc_snaive("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30") 
+
+# one-month forecasting errors
+one_month_1 <-fc_snaive("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30") 
+one_month_2<- fc_snaive("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31") 
+one_month_3<-fc_snaive("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31") 
+one_month_4<-fc_snaive("2008-05-01","2009-01-31",hotel_no,"2010-02-01","2010-02-28") 
+one_month_5<-fc_snaive("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31") 
+one_month_6<-fc_snaive("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30") 
+
+# combine all the matrix
+naive_result<-rbind(six_month,three_month_1,three_month_2,three_month_3,three_month_4,one_month_1,one_month_2,one_month_3,one_month_4,one_month_5,one_month_6)
+# transfer to data frame and only keep test data result and MAE and MAPE
+naive_result.df<- as.data.frame(naive_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0 |row_number()%%2 ==1)
+# rename the row name
+naive_result<-data.frame(forecast_period= fc_timestamp, naive_result.df)
+
+# SArima model forecast
+## six-month forecasting errors
+
+six_month_SArima <- fc_Sarima(hotel_no, "2008-05-01","2009-10-31","2009-11-01","2010-04-30",p,d,q,P,D,Q)
+
+
+## three-month forecasting errors
+three_month_1_SArima <-fc_Sarima(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2010-01-31",p,d,q,P,D,Q) 
+
+three_month_2_SArima <-fc_Sarima(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2010-02-28",p,d,q,P,D,Q)  
+
+three_month_3_SArima <-fc_Sarima(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-03-31",p,d,q,P,D,Q) 
+
+three_month_4_SArima<-fc_Sarima(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-04-30",p,d,q,P,D,Q)    
+
+## one-month forecasting errors
+one_month_1_SArima <-fc_Sarima(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2009-11-30",p,d,q,P,D,Q)  
+one_month_2_SArima <-fc_Sarima(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2009-12-31",p,d,q,P,D,Q)  
+one_month_3_SArima <-fc_Sarima(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-01-31",p,d,q,P,D,Q)  
+one_month_4_SArima <-fc_Sarima(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-02-28",p,d,q,P,D,Q)  
+one_month_5_SArima <-fc_Sarima(hotel_no,"2008-05-01","2010-02-28","2010-03-01","2010-03-31",p,d,q,P,D,Q)  
+one_month_6_SArima <-fc_Sarima(hotel_no,"2008-05-01","2010-03-31","2010-04-01","2010-04-30",p,d,q,P,D,Q)  
+
+# combine all the matrix
+Sarima_result<-rbind(six_month_SArima,three_month_1_SArima,three_month_2_SArima,three_month_3_SArima,three_month_4_SArima,one_month_1_SArima,one_month_2_SArima,one_month_3_SArima,one_month_4_SArima,one_month_5_SArima,one_month_6_SArima)
+# transfer to data frame and only keep MAE and MAPE
+Sarima_result.df<- as.data.frame(Sarima_result)%>%select("MAE","MAPE")%>%filter(row_number() %% 2 == 0|row_number()%%2==1)
+# rename the row name
+Sarima_result <-data.frame(forecast_period= fc_timestamp, Sarima_result.df)
+# mutate MAPE as decimal number
+Sarima_result  <- Sarima_result %>% mutate(MAPE= MAPE/100)
+# calculate MASE
+Sarima_result <- Sarima_result %>% mutate(MASE = as.matrix(Sarima_result["MAE"])/as.matrix(naive_result["MAE"]))
+# remove MASE for in-sample
+Sarima_result <- Sarima_result %>% mutate(MASE = ifelse(row_number() %%2 ==1,"NaN",MASE))
+
+return(Sarima_result)
+}
+```
+
+
+
+### create MASE function for ARIMA and SARIMA
+```{r}
+fc_result_arimasarima <- function(hotel_no,p,d,q,p_S,d_S,q_S,P,D,Q) {
+         k<-fc_result(hotel_no)
+         A<-fc_Arima_error (hotel_no,p,d,q)
+         SA<-fc_SArima_error (hotel_no,p_S,d_S,q_S,P,D,Q)
+
+  
+  MASE <- data.frame(forecast_period=k[["naive"]][,1],Arima=A[,4],Sarima=SA[,4])
+  
+  return(list(MASE=MASE))
+}
+```
+
+
+
+
+
+### create Arima 95% prediction comparison function
+```{r}
+fc_Arima_95pct <- function(hotel_no,p,d,q) { 
+  
+# create ARIMA prediction interval function
+  fc_Arima_interval <- function(hotel_no,traintime1,traintime2,testtime1,testtime2,p,d,q) { 
+  k = abs(as.numeric(difftime(as.Date(traintime1), as.Date(traintime2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(testtime1), as.Date(testtime2), unit = "day"))) + 1
+  training_ts <- subset(full_dataset_ts,end=k)
+  lambda <- BoxCox.lambda(in_sample_dataset_ts[,hotel_no])
+
+  ## Arima model forecast
+  fc_Arima<- Arima(training_ts[,hotel_no], lambda = lambda, order=c(p,d,q)) %>% forecast(h=k1)
+
+  ## retrieve value of interest
+  Arima_result  <- data.frame(full_dataset[(k+1):(k+k1),c(1,(hotel_no+1))],fc=fc_Arima[["mean"]],Arima_low95pc = fc_Arima[["lower"]][,2],Arima_up95pc = fc_Arima[["upper"]][,2])
+ names(Arima_result)[1:2] =c("stay_date", "Final_arrival")
+ result <- Arima_result  %>% mutate(Forecast = ifelse(Final_arrival >= Arima_low95pc & Final_arrival <= Arima_up95pc,1,0))
+ return(result) 
+}
+
+# Get Arima model forecast interval result
+## six-month forecasting errors
+six_month_Arima <- fc_Arima_interval(hotel_no, "2008-05-01","2009-10-31","2009-11-01","2010-04-30", p,d,q) 
+
+## three-month forecasting errors
+three_month_1_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2010-01-31",p,d,q)  
+
+three_month_2_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2010-02-28",p,d,q) 
+
+three_month_3_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-03-31",p,d,q) 
+
+three_month_4_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-04-30",p,d,q)   
+
+## one-month forecasting errors
+one_month_1_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2009-11-30",p,d,q)  
+one_month_2_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2009-12-31",p,d,q)  
+one_month_3_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-01-31",p,d,q)  
+one_month_4_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-02-28",p,d,q)  
+one_month_5_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2010-02-28","2010-03-01","2010-03-31",p,d,q)  
+one_month_6_Arima <-fc_Arima_interval(hotel_no,"2008-05-01","2010-03-31","2010-04-01","2010-04-30",p,d,q) 
+
+
+# combine data as dataset
+value<-c(mean(six_month_Arima$Forecast),mean(three_month_1_Arima$Forecast),mean(three_month_2_Arima$Forecast),mean(three_month_3_Arima$Forecast),mean(three_month_4_Arima$Forecast),mean(one_month_1_Arima$Forecast),mean(one_month_2_Arima $Forecast),mean(one_month_3_Arima$Forecast),mean(one_month_4_Arima$Forecast),mean(one_month_5_Arima $Forecast),mean(one_month_6_Arima $Forecast))
+
+result <- data.frame(forecast_period= fc_timestamp,Arima_in_95pc = value)
+
+return(result)
+                
+}
+
+
+```
+
+
+### create Seasonal Arima 95% prediction comparison function
+```{r}
+fc_SArima_95pct <- function(hotel_no,p,d,q,P,Q,D) { 
+  
+# create SARIMA prediction interval function
+  fc_SArima_interval <- function(hotel_no,traintime1,traintime2,testtime1,testtime2,p,d,q,P,Q,D) { 
+  k = abs(as.numeric(difftime(as.Date(traintime1), as.Date(traintime2), unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(as.Date(testtime1), as.Date(testtime2), unit = "day"))) + 1
+  training_ts <- subset(full_dataset_ts,end=k)
+  lambda <- BoxCox.lambda(training_ts[,hotel_no])
+
+  ## Arima model forecast
+  fc_SArima<- Arima(training_ts[,hotel_no], lambda=lambda,order=c(p,d,q),seasonal=c(P,Q,D),method ="CSS") %>% forecast(h=k1)
+
+  ## retrieve value of interest
+  SArima_result  <- data.frame(full_dataset[k+1:k1,c(1,hotel_no+1)],SArima_low95pc = fc_SArima[["lower"]][,2],SArima_up95pc =      fc_SArima[["upper"]][,2])
+ names(SArima_result)[1:2] =c("stay_date", "Final_arrival")
+ result <- SArima_result  %>% mutate(Forecast = ifelse(Final_arrival >= SArima_low95pc & Final_arrival <= SArima_up95pc,1,0))
+ return(result) 
+}
+
+# Get Arima model forecast interval result
+## six-month forecasting errors
+six_month_SArima <- fc_SArima_interval(hotel_no, "2008-05-01","2009-10-31","2009-11-01","2010-04-30", p,d,q,P,Q,D) 
+
+## three-month forecasting errors
+three_month_1_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2010-01-31",p,d,q,P,Q,D)  
+
+three_month_2_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2010-02-28",p,d,q,P,Q,D) 
+
+three_month_3_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-03-31",p,d,q,P,Q,D) 
+
+three_month_4_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-04-30",p,d,q,P,Q,D) 
+
+## one-month forecasting errors
+one_month_1_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2009-10-31","2009-11-01","2009-11-30",p,d,q,P,Q,D)  
+one_month_2_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2009-11-30","2009-12-01","2009-12-31",p,d,q,P,Q,D)  
+one_month_3_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2009-12-31","2010-01-01","2010-01-31",p,d,q,P,Q,D)  
+one_month_4_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2010-01-31","2010-02-01","2010-02-28",p,d,q,P,Q,D)  
+one_month_5_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2010-02-28","2010-03-01","2010-03-31",p,d,q,P,Q,D)  
+one_month_6_SArima <-fc_SArima_interval(hotel_no,"2008-05-01","2010-03-31","2010-04-01","2010-04-30",p,d,q,P,Q,D) 
+
+
+# combine data as dataset
+value <- c(mean(six_month_SArima$Forecast),mean(three_month_1_SArima$Forecast),mean(three_month_2_SArima$Forecast),mean(three_month_3_SArima$Forecast),mean(three_month_4_SArima$Forecast),mean(one_month_1_SArima$Forecast),mean(one_month_2_SArima $Forecast),mean(one_month_3_SArima$Forecast),mean(one_month_4_SArima$Forecast),mean(one_month_5_SArima $Forecast),mean(one_month_6_SArima $Forecast))
+
+result <- data.frame(forecast_period= fc_timestamp,SArima_in_95pc = value)
+
+return(result)
+                
+}
+
+```
+
+### create forecast result across model
+```{r}
+fc_result_across2 <- function(hotel_no,p,d,q,p_S,d_S,q_S,P,D,Q) {
+         k<-fc_result(hotel_no)
+         A<-fc_Arima_error (hotel_no,p,d,q)
+         SA<-fc_SArima_error (hotel_no,p_S,d_S,q_S,P,D,Q)
+  MAE <-data.frame(forecast_period= k[["naive"]][,1],ses=k[["ses"]][,2],holt=k[["holt"]][,2],hw_add=k[["hw_add"]][,2],hw_mul=k[["hw_mul"]][,2],Arima=A[,2],Sarima=SA[,2])
+  
+  MAPE <-data.frame(forecast_period=k[["naive"]][,1],ses=k[["ses"]][,3],holt=k[["holt"]][,3],hw_add=k[["hw_add"]][,3],hw_mul=k[["hw_mul"]][,3],Arima=A[,3],Sarima=SA[,3])
+  
+  MASE <- data.frame(forecast_period=k[["naive"]][,1],ses=k[["ses"]][,4],holt=k[["holt"]][,4],hw_add=k[["hw_add"]][,4],hw_mul=k[["hw_mul"]][,4],Arima=A[,4],Sarima=SA[,4])
+  
+  return(list(MAE=MAE, MAPE=MAPE,MASE=MASE))
+}
+```
+
+## create parameters benchmark model
+```{r}
+GLWST_auto <- fc_auto.arima(1)
+summary(GLWST_auto)
+
+MLKEP_auto <- fc_auto.arima(2)
+summary(MLKEP_auto)
+
+WARUK_auto <- fc_auto.arima(3)
+summary(WARUK_auto)
+
+```
+
+## modeling and result - GLWST
+
+
+### apply unit root test plot acf/pacf
+```{r}
+# transform data with specific lambda
+h01 <- in_sample_dataset_ts[,1]
+autoplot(h01)
+lambda <- BoxCox.lambda(h01)
+lh01 <- BoxCox(h01,lambda)
+autoplot(lh01)
+
+
+# apply unit root test
+lh01 %>% ur.kpss() %>% summary()
+lh01 %>% ndiffs()
+lh01 %>% diff() %>% ur.kpss() %>% summary()
+
+# acf pacf
+# first diff
+#lh01 %>% diff() %>% ggtsdisplay(main="Time Plot, ACF and PACF after first-order differencing")
+# seasonal diff
+#lh01 %>% diff(lag=7) %>%  ggtsdisplay(main="seasonal differences")
+# first and second diff
+#lh01 %>% diff() %>% diff() %>%  ggtsdisplay(main="second differences")
+# seasonal diff and first diff
+lh01 %>% diff(lag=7) %>% diff() %>%  ggtsdisplay(main="Time Plot, ACF and PACF after first-order differencing and seasonal differencing")
+```
+
+### select parameters for Arima model and plot residuals
+
+```{r}
+# Benchmark AICc=9510.82 ARIMA(2,1,1)(1,0,0)[7] 
+GLWST_1 <- fc_Arima(1,7,1,2) #AICc=9509.8 
+summary(GLWST_1)
+
+checkresiduals(GLWST_1) 
+
+#GLWST_2 <- fc_Arima(1,1,1,1) #AICc=9609.19 
+#summary(GLWST_2)
+
+#GLWST_3 <- fc_Arima(1,0,1,2) #AICc=9602.75
+#summary(GLWST_3)
+
+GLWST_4 <- fc_Arima(1,7,1,21) #AICc=9456.41
+summary(GLWST_4)
+checkresiduals(GLWST_4)
+
+#GLWST_5 <- fc_Arima(1,3,2,1) #AICc=9646.07
+#summary(GLWST_5)
+
+#GLWST_6 <- fc_Arima(1,0,2,6) #AICc=9598.98
+#summary(GLWST_6)
+
+#GLWST_7 <- fc_Arima(1,6,2,21) #AICc=9458.78
+#summary(GLWST_7)
+
+
+```
+
+
+### Arima Forecast
+```{r rows.print=25}
+
+fc_Arima_error(1,7,1,21)
+fc_Arima_error(1,7,1,2)
+```
+
+### Arima Prediction interval accuracy
+```{r rows.print=25}
+fc_Arima_95pct(1,7,1,2)
+
+```
+
+### select parameters for SArima model and plot residuals
+```{r }
+# Benchmark AICc=9510.82 ARIMA(2,1,1)(1,0,0)[7] 
+#GLWST_S1 <- fc_SArima(1,1,0,1,1,1,3)  #AICc=9338.35 
+#summary(GLWST_S1)
+
+#GLWST_S2 <- fc_SArima(1,1,0,2,2,1,1)  #AICc=9335.38 
+#summary(GLWST_S2)
+
+#GLWST_S3 <- fc_SArima(1,3,1,1,2,1,3)  #AICc=9324.79
+#summary(GLWST_S3)
+
+#GLWST_S4 <- fc_SArima(1,3,1,2,2,1,1)  #AICc=9324.87
+#summary(GLWST_S4)
+
+GLWST_S5 <- fc_SArima(1,3,1,1,3,1,1)  #AICc=9315.48
+summary(GLWST_S5)
+checkresiduals(GLWST_S5) 
+
+#GLWST_S6 <- fc_SArima(1,7,0,0,0,1,2)  #AICc=9338.51
+#summary(GLWST_S6)
+```
+
+
+### SArima Forecast
+```{r rows.print=25}
+fc_SArima_error(1,3,1,1,3,1,1)
+
+```
+
+
+### SArima Prediction interval accuracy
+```{r rows.print=25}
+fc_SArima_95pct(1,3,1,1,3,1,1)
+
+GLWST_95interval <-cbind(fc_Arima_95pct(1,7,1,2),fc_SArima_95pct(1,3,1,1,3,1,1)[2])
+GLWST_95interval <- txtRound(GLWST_95interval[-1],2)
+GLWST_95interval <- data.frame(forecast_period = fc_timestamp, GLWST_95interval)
+htmlTable(GLWST_95interval)
+```
+**Observations**
+ 
++ the 95percent prediction are not very robust and stable, with many moths forecast fall out the 95pct interval, 6month forecast for Nov2009, 3month forecast for Feb2009 and 1month forecast for Feb2009 perform the worst.
+
+
+
+### Comparison by MAE, MAPE and MASE across 6 models
+```{r rows.print=25}
+fc_result_across2(1,7,1,2,3,1,1,3,1,1)
+```
+
+
+### comparison by MASE between ARIMA and SARIMA
+```{r}
+fc_result_arimasarima(1,7,1,2,3,1,1,3,1,1)
+GLWST_arimaerror <-data.frame(fc_result_arimasarima(1,7,1,2,3,1,1,3,1,1)) %>% filter(row_number()%%2 ==0)
+
+GLWST_arimaerror<-txtRound(GLWST_arimaerror[,-1],2)
+GLWST_arimaerror <- data.frame(forecast_period=fc_timestamp_out,GLWST_arimaerror) 
+htmlTable(GLWST_arimaerror)
+
+```
+
+
+
+**Observations**
+ 
++ the forecast accuracy of Arima and Sarima model for GLWST hotel dosen't outperform ets model in most of the months forcast except the 1month for Feb2009, however, it still forecast worst than naive model for that month.
+
+
+## modeling and result - MLKEP
+
+### apply unit root test plot acf/pacf
+```{r}
+# transform data with specific lambda
+h02 <- in_sample_dataset_ts[,2]
+autoplot(h02)
+lambda <- BoxCox.lambda(h02)
+lh02 <- BoxCox(h02,lambda)
+autoplot(lh02)
+
+# apply unit root test
+lh02 %>% ur.kpss() %>% summary()
+lh02 %>% ndiffs()
+lh02 %>% nsdiffs()
+
+# acf pacf
+lh02 %>% diff() %>% ur.kpss() %>% summary()
+# no difference
+lh02 %>% ggtsdisplay(main="Time Plot, ACF and PACF with no differencing")
+# first 
+lh02 %>% diff() %>% ggtsdisplay(main="first difference") 
+# seasonal
+lh02 %>% diff(lag=7) %>% ggtsdisplay(main="Time Plot, ACF and PACF after seasonal differencing")
+# first and second
+lh02 %>% diff() %>% diff() %>%  ggtsdisplay(main="second difference")
+# seasonal and first diff
+lh02 %>% diff(lag=7) %>% diff() %>%  ggtsdisplay(main="seasonal and first difference")
+```
+
+### select parameters for Arima model and plot residuals
+```{r}
+# Benchmark AICc=1240.48
+#MLKEP_1 <- fc_Arima(2,1,0,2) #  AICc=1768.3
+#summary(MLKEP_1)
+
+#MLKEP_2 <- fc_Arima(2,3,2,1)  # AICc=1916.25 
+#summary(MLKEP_2)
+
+#MLKEP_3 <- fc_Arima(2,1,1,1) # AICc=1798.65 
+#summary(MLKEP_3)
+
+MLKEP_4 <- fc_Arima(2,1,0,21) # AICc=1486.97 
+summary(MLKEP_4)
+checkresiduals(MLKEP_4)
+
+```
+
+
+### select parameters for SArima model and plot residuals
+```{r}
+# Benchmark AICc=1240.48
+#MLKEP_S1 <- fc_SArima(2,2,1,1,1,1,2) # 1239.37
+#summary(MLKEP_S1)
+
+
+#MLKEP_S2 <- fc_SArima(2,3,1,1,1,1,2)) # 1239.37
+#summary(MLKEP_S2)
+
+#MLKEP_S3 <- fc_SArima(2,1,1,1,1,1,2)) # 1238.11
+#summary(MLKEP_S3)
+
+#MLKEP_S4 <- fc_SArima(2,6,1,0,7,0,0)) # 1238.11
+#summary(MLKEP_S3)
+
+MLKEP_S4 <- fc_SArima(2,7,0,0,0,1,2) # 1230.5
+summary(MLKEP_S4)
+checkresiduals(MLKEP_S4) 
+
+```
+
+
+### Arima Forecast
+```{r rows.print=25}
+
+fc_Arima_error(2,1,0,21)
+```
+
+### Arima Prediction interval accuracy
+```{r}
+fc_Arima_95pct(2,1,0,21)
+```
+
+
+### Seasonal Arima Forecast
+```{r rows.print=25}
+fc_SArima_error(2,7,0,0,0,1,2)
+
+```
+
+### SArima Prediction interval accuracy
+```{r rows.print=25}
+fc_SArima_95pct(2,7,0,0,0,1,2)
+
+MLKEP_95interval <- cbind(fc_Arima_95pct(2,1,0,21),fc_SArima_95pct(2,7,0,0,0,1,2)[2])
+MLKEP_95interval <- txtRound(MLKEP_95interval[-1],2)
+MLKEP_95interval <- data.frame(forecast_period = fc_timestamp,MLKEP_95interval)
+htmlTable(MLKEP_95interval)
+```
+
+### Comparison by MAE, MAPE and MASE across 6 models
+```{r rows.print=25}
+fc_result_across2(2,1,0,21,7,0,0,0,1,2)
+```
+
+
+### comparison by MASE between ARIMA and SARIMA
+```{r}
+fc_result_arimasarima(2,1,0,21,7,0,0,0,1,2)
+MLKEP_arimaerror <-data.frame(fc_result_arimasarima(2,1,0,21,7,0,0,0,1,2)) %>% filter(row_number()%%2 ==0)
+
+MLKEP_arimaerror<-txtRound(MLKEP_arimaerror[,-1],2)
+MLKEP_arimaerror <- data.frame(forecast_period=fc_timestamp_out,MLKEP_arimaerror) 
+htmlTable(MLKEP_arimaerror)
+
+
+
+```
+
+**Observations**
+ 
++ Generally, the forecast accuracy of Sarima model perform better than ets models, howerver except 1month forecast of Mar2009 and April2009, all the forecast are worst than the naive model.
+
+
+
+## modeling and result - WARUK
+
+### apply unit root test plot acf/pacf
+```{r}
+# transform data with specific lambda
+h03 <- in_sample_dataset_ts[,3]
+autoplot(h03)
+lambda <- BoxCox.lambda(h03)
+lh03 <- BoxCox(h03,lambda)
+autoplot(lh03)
+
+# apply unit root test
+lh03 %>% ur.kpss() %>% summary()
+lh03 %>% nsdiffs()
+lh03 %>% diff(lag=7)  %>%  ndiffs()
+lh03 %>%  diff(lag=7) %>%  ur.kpss() %>% summary() #  pass the root test for stationarity
+
+# acf pacf
+# first diff
+lh03 %>% diff() %>% ggtsdisplay(main="first difference")
+# seasonal diff
+lh03 %>% diff(lag=7) %>%  ggtsdisplay(main="seasonal difference")
+# first and second diff
+lh03 %>% diff() %>% diff() %>%  ggtsdisplay(main="second difference")
+# seasonal diff and first diff
+lh03 %>% diff(lag=7) %>% diff() %>%  ggtsdisplay(main="seasonal and first difference")
+```
+
+### select parameters for Arima model and plot residuals
+```{r}
+# Benchmark AICc=2838.85 ARIMA(2,0,0)(2,1,2)[7] 
+#WARUK_1 <- fc_Arima(3,0,1,21)  #AICc=3089.93
+#summary(WARUK_1)
+
+WARUK_2 <- fc_Arima(3,6,1,1)  #AICc=3050.76 
+summary(WARUK_2)
+checkresiduals(WARUK_2)
+
+#WARUK_3 <- fc_Arima(3,6,1,0)  #AICc=3071.94 
+#summary(WARUK_3)
+
+```
+
+
+### select parameters for SArima model and plot residuals
+```{r }
+# Benchmark AICc=2838.85 ARIMA(2,0,0)(2,1,2)[7] 
+#WARUK_S1 <- fc_SArima(3,1,0,1,2,1,1)  #AICc=2842.54
+#summary(WARUK_S1)
+
+#WARUK_S2 <- fc_SArima(3,1,0,2,2,1,1)  #AICc=2844.02 
+#summary(WARUK_S2)
+
+#WARUK_S3 <- fc_SArima(3,1,0,1,3,1,1)  #AICc=2824.48 
+#summary(WARUK_S3)
+
+#WARUK_S4 <- fc_SArima(3,0,1,1,0,1,1) #AICc=2902.7
+#summary(WARUK_S4)
+
+WARUK_S5 <- fc_SArima(3,8,0,1,2,1,1)  #AICc=2819.74
+summary(WARUK_S5)
+checkresiduals(WARUK_S5) 
+```
+
+
+### Arima Forecast
+```{r rows.print=25}
+fc_Arima_error(3,6,1,1)
+
+```
+
+### Arima Prediction interval accuracy
+```{r}
+fc_Arima_95pct(3,6,1,1)
+```
+
+
+**Observations**
+ 
++ the 95percent prediction are quite robust and stable enough, all records are 100% fall inside the interval except 3 month forecast of FEB 2009 and 1month forecast of Mar2010 which have more than 5% records fall out the interval
+
+
+### Seasonal Arima Forecast
+```{r rows.print=25}
+fc_SArima_error(3,8,0,1,2,1,1)
+
+```
+
+### SArima Prediction interval accuracy
+```{r rows.print=25}
+fc_SArima_95pct(3,8,0,1,2,1,1)
+
+
+WARUK_95interval <- cbind(fc_Arima_95pct(3,6,1,1),fc_SArima_95pct(3,8,0,1,2,1,1)[2])
+WARUK_95interval <- txtRound(WARUK_95interval[-1],2)
+WARUK_95interval <- data.frame(forecast_period = fc_timestamp,WARUK_95interval)
+htmlTable(WARUK_95interval)
+
+```
+
+
+### comparison by MASE between ARIMA and SARIMA
+```{r}
+fc_result_arimasarima(3,6,1,1,8,0,1,2,1,1)
+WARUK_arimaerror <-data.frame(fc_result_arimasarima(3,6,1,1,8,0,1,2,1,1)) %>% filter(row_number()%%2 ==0)
+
+WARUK_arimaerror<-txtRound(WARUK_arimaerror[,-1],2)
+WARUK_arimaerror <- data.frame(forecast_period=fc_timestamp_out,WARUK_arimaerror) 
+htmlTable(WARUK_arimaerror)
+
+```
+
+
+
+
+**Observations**
+
++ the 95percent prediction are quite robust and stable enough, except one month forecast of FEB 2009 that more than 5% records fall outside the 95pct interval
+
+
+### Comparison by MAE, MAPE and MASE across 6 models
+```{r rows.print=25}
+fc_result_across2(3,6,1,1,8,0,1,2,1,1)
+```
+**Observations**
+ 
++ Generally, the forecast accuracy of Sarima model for outperform accoss all models in most of the months forcast except the 1month for Dec2009 and Jan2010, which are worst than the naive model.
+
+
+# combined model
+
+## create model and functions
+
+### create forecast loop function for holt-winter model for training data
+```{r}
+# holt winter forecast function
+fc_hw_loop <- function(traintime1,traintime2,hotel_no,testtime1,testtime2,season) {
+  
+  # create holt-winters forecast function
+  fc_hw<- function(traintime1,traintime2,hotel_no,testtime1,testtime2,season) {
+  k = abs(as.numeric(difftime(traintime1, traintime2, unit = "day"))) + 1
+  k1= abs(as.numeric(difftime(testtime1, testtime2, unit = "day"))) + 1
+  training_ts <- subset(smoothing_dataset_ts,end=k)
+  fc_ts<- hw(training_ts[,hotel_no],h=k1,seasonal=season,damped = TRUE)
+  return(fc_ts)
+}
+
+
+# Initiate rolling forecast 
+fcday1 <-fc_hw(traintime1,traintime2, hotel_no ,testtime1,testtime2, season)
+fc <- data.frame(forecast = as.numeric(fcday1$mean),stay_date = (seq(as.Date(testtime1), as.Date(testtime2),by="day")),CONF_DT=as.Date(traintime2) )
+
+# create loop and forecast
+for (delta in 1: (as.numeric(difftime(testtime2, testtime1, unit = "day"))-1)) {
+
+  hwtest <- fc_hw(as.Date(traintime1), as.Date(traintime2) + delta,hotel_no,as.Date(testtime1) + delta, as.Date(testtime2), season)
+  hwtest_mean <- data.frame(forecast=as.numeric(hwtest$mean),stay_date = (seq(as.Date(testtime1) + delta,  as.Date(testtime2),by="day")),CONF_DT=as.Date(traintime2) + delta)
+
+
+  fc <- rbind(fc, hwtest_mean)
+}
+
+ fc<- fc %>% mutate(days_prior = stay_date-CONF_DT,hotel=ifelse(hotel_no == 1 ,"GLWST",
+                                                                ifelse(hotel_no == 2,"MLKEP","WARUK")))
+ return(fc)
+}
+
+
+```
+
+### create forecast function  using holt-winter model for out sample
+```{r}
+# holt winter forecast function
+fc_hw_daysprior <- function(hotel_no,season) {
+  
+  
+# hw_add
+# six-month forecasting errors
+six_month_hw <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-04-30",season) 
+fc1 <- data.frame(forecast = as.numeric(six_month_hw$mean),stay_date = (seq(as.Date("2009-11-01"), as.Date("2010-04-30"),by="day")),CONF_DT=as.Date("2009-10-31"),forecast_period= "6m_Nov-Apr_out")
+
+# three-month forecasting errors
+three_month_1_hw  <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2010-01-31", season)
+fc2 <- data.frame(forecast = as.numeric(three_month_1_hw$mean),stay_date = (seq(as.Date("2009-11-01"), as.Date("2010-01-31",),by="day")),CONF_DT=as.Date("2009-10-31"),forecast_period= "3m_Nov-Jan_out" )
+
+three_month_2_hw  <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2010-02-28", season)
+fc3 <- data.frame(forecast = as.numeric(three_month_2_hw$mean),stay_date = (seq(as.Date("2009-12-01"), as.Date("2010-02-28",),by="day")),CONF_DT=as.Date("2009-11-30"),forecast_period= "3m_Dec-Feb_out" )
+
+three_month_3_hw  <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-03-31", season)
+fc4 <- data.frame(forecast = as.numeric(three_month_3_hw$mean),stay_date = (seq(as.Date("2010-01-01"), as.Date("2010-03-31",),by="day")),CONF_DT=as.Date("2009-12-31"),forecast_period= "3m_Jan-Mar_out" )
+
+three_month_4_hw  <-fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-04-30", season)
+fc5 <- data.frame(forecast = as.numeric(three_month_4_hw$mean),stay_date = (seq(as.Date("2010-02-01"), as.Date("2010-04-30"),by="day")),CONF_DT=as.Date("2010-01-31"),forecast_period= "3m_Feb-Apr_out" )
+
+# one-month forecasting errors
+one_month_1_hw  <-fc_hw("2008-05-01","2009-10-31",hotel_no,"2009-11-01","2009-11-30", season)
+fc6 <- data.frame(forecast = as.numeric(one_month_1_hw$mean),stay_date = (seq(as.Date("2009-11-01"), as.Date("2009-11-30"),by="day")),CONF_DT=as.Date("2009-10-31"),forecast_period= "1m_Nov_out" )
+
+one_month_2_hw  <-fc_hw("2008-05-01","2009-11-30",hotel_no,"2009-12-01","2009-12-31", season)
+fc7 <- data.frame(forecast = as.numeric(one_month_2_hw$mean),stay_date = (seq(as.Date("2009-12-01"), as.Date("2009-12-31"),by="day")),CONF_DT=as.Date("2009-11-30"),forecast_period= "1m_Dec_out" )
+
+one_month_3_hw  <-fc_hw("2008-05-01","2009-12-31",hotel_no,"2010-01-01","2010-01-31", season) 
+fc8 <- data.frame(forecast = as.numeric(one_month_3_hw$mean),stay_date = (seq(as.Date("2010-01-01"), as.Date("2010-01-31"),by="day")),CONF_DT=as.Date("2009-12-31"),forecast_period= "1m_Jan_out" )
+
+one_month_4_hw  <-fc_hw("2008-05-01","2010-01-31",hotel_no,"2010-02-01","2010-02-28", season) 
+fc9 <- data.frame(forecast = as.numeric(one_month_4_hw$mean),stay_date = (seq(as.Date("2010-02-01"), as.Date("2010-02-28"),by="day")),CONF_DT=as.Date("2010-01-31"),forecast_period= "1m_Feb_out" )
+
+one_month_5_hw  <-fc_hw("2008-05-01","2010-02-28",hotel_no,"2010-03-01","2010-03-31", season) 
+fc10 <- data.frame(forecast = as.numeric(one_month_5_hw$mean),stay_date = (seq(as.Date("2010-03-01"), as.Date("2010-03-31"),by="day")),CONF_DT=as.Date("2010-02-28"),forecast_period= "1m_Mar_out" )
+
+one_month_6_hw  <-fc_hw("2008-05-01","2010-03-31",hotel_no,"2010-04-01","2010-04-30", season)
+fc11 <- data.frame(forecast = as.numeric(one_month_6_hw$mean),stay_date = (seq(as.Date("2010-04-01"), as.Date("2010-04-30"),by="day")),CONF_DT=as.Date("2010-03-31"),forecast_period= "1m_Apr_out" )
+
+
+# merge data
+result <- rbind(fc1,fc2,fc3,fc4,fc5,fc6,fc7,fc8,fc9,fc10,fc11)
+result <- result %>% mutate(hotel=ifelse(hotel_no == 1 ,"GLWST",
+                                                                ifelse(hotel_no == 2,"MLKEP","WARUK")))
+return(result)
+}
+
+
+```
+
+### create forecast weight function 
+```{r}
+fc_combined_weight<- function(dataset,hotel_name,model1,model2,factor) { 
+  
+  if(factor == "days_prior_c") {
+    # days prior '1-7'
+  hotel_dataset1 <- dataset %>% 
+  filter(hotel == hotel_name,days_prior_c == '1 to 7')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod1 <- lm(formula,data = hotel_dataset1 )
+  hotel_dataset1 <- hotel_dataset1 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod1$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod1$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod1$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod1$coefficients[3])
+  
+# days prior '8-14'
+    hotel_dataset2 <- dataset %>% 
+  filter(hotel == hotel_name,days_prior_c == '8 to 14')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = "+"), 
+        sep = " ~ "))
+  linearMod2 <- lm(formula,data = hotel_dataset2 )
+  hotel_dataset2 <- hotel_dataset2 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod2$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod2$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod2$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod2$coefficients[3])
+  
+# days prior '15-21'
+    hotel_dataset3 <- dataset %>% 
+  filter(hotel == hotel_name,days_prior_c == '15 to 21')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod3 <- lm(formula,data = hotel_dataset3 )
+  hotel_dataset3 <- hotel_dataset3 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod3$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod3$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod3$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod3$coefficients[3])
+  
+# days prior '22-28'
+  hotel_dataset4 <- dataset %>% 
+  filter(hotel == hotel_name,days_prior_c == '22 to 28')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod4 <- lm(formula,data = hotel_dataset4 )
+  hotel_dataset4 <- hotel_dataset4 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod4$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod4$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod4$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod4$coefficients[3])
+  
+# days prior '29-60'
+    hotel_dataset5 <- dataset %>% 
+  filter(hotel == hotel_name,days_prior_c == '29 to 60')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod5 <- lm(formula,data = hotel_dataset5 )
+  hotel_dataset5 <- hotel_dataset5 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod5$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod5$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod5$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod5$coefficients[3])
+
+# days prior '60 or more'
+   hotel_dataset6 <- dataset %>% 
+  filter(hotel == hotel_name,days_prior_c == '60 or more')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod6 <- lm(formula,data = hotel_dataset6 )
+  hotel_dataset6 <- hotel_dataset6 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod6$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod6$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod6$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod6$coefficients[3])
+  
+  hotel_dataset<-rbind(hotel_dataset1,hotel_dataset2,hotel_dataset3,hotel_dataset4,hotel_dataset5,hotel_dataset6)
+  
+  result <- list('1 to 7'=linearMod1,'8 to 14'=linearMod2,'15 to 21'= linearMod3,'22 to 28'=linearMod4,
+              '29 to 60'= linearMod5,'60 or more'= linearMod6,dataset=hotel_dataset)
+  } else {
+ 
+# DOW 'Sun'
+  hotel_dataset1 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Sun')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod1 <- lm(formula,data = hotel_dataset1 )
+  hotel_dataset1 <- hotel_dataset1 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod1$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod1$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod1$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod1$coefficients[3])
+  
+# DOW 'Mon'
+    hotel_dataset2 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Mon')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = "+"), 
+        sep = " ~ "))
+  linearMod2 <- lm(formula,data = hotel_dataset2 )
+  hotel_dataset2 <- hotel_dataset2 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod2$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod2$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod2$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod2$coefficients[3])
+  
+# DOW 'Tue'
+    hotel_dataset3 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Tue')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod3 <- lm(formula,data = hotel_dataset3 )
+  hotel_dataset3 <- hotel_dataset3 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod3$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod3$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod3$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod3$coefficients[3])
+  
+# DOW 'Wed'
+  hotel_dataset4 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Wed')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod4 <- lm(formula,data = hotel_dataset4 )
+  hotel_dataset4 <- hotel_dataset4 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod4$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod4$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod4$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod4$coefficients[3])
+  
+ # DOW 'Thu'
+    hotel_dataset5 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Thu')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod5 <- lm(formula,data = hotel_dataset5 )
+  hotel_dataset5 <- hotel_dataset5 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod5$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod5$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod5$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod5$coefficients[3])
+
+# DOW 'Fri'
+   hotel_dataset6 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Fri')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod6 <- lm(formula,data = hotel_dataset6 )
+  hotel_dataset6 <- hotel_dataset6 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod6$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod6$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod6$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod6$coefficients[3])
+  
+  # DOW 'Sat'
+  hotel_dataset7 <- dataset %>% 
+  filter(hotel == hotel_name,DOW == 'Sat')
+  formula <- as.formula(
+    paste("final_arrivals", 
+        paste(c(model1,model2), collapse = " + "), 
+        sep = " ~ "))
+  linearMod7 <- lm(formula,data = hotel_dataset7 )
+  hotel_dataset7 <- hotel_dataset7 %>% 
+    mutate(!!paste(c(model1,model2),collapse = ".") :=  linearMod7$fitted.values,
+           !!paste(c("interc",model1,model2),collapse = ".") :=linearMod6$coefficients[1],
+           !!paste(c("coef1",model1,model2),collapse = ".") :=  linearMod6$coefficients[2],
+           !!paste(c("coef2",model1,model2),collapse = ".") :=  linearMod6$coefficients[3])
+  
+  hotel_dataset<-rbind(hotel_dataset1,hotel_dataset2,hotel_dataset3,hotel_dataset4,hotel_dataset5,hotel_dataset6,hotel_dataset7)
+  result<-list('Sun'=linearMod1,'Mon'=linearMod2,'Tue'= linearMod3,'Wed'=linearMod4,
+              'Thu'= linearMod5,'Fri'= linearMod6,'Sat'= linearMod7,dataset=hotel_dataset) }
+  
+  
+  return(result)
+}
+ 
+
+```
+
+
+### create cross erros results functions for combined models in training data
+```{r}
+cross_result_error <- function(hotelname,factor) {
+  
+cross_result <- function(dataset,hotel_name,model1,model2,factor) { 
+  
+  # run the combined function
+  fc_combined<-fc_combined_weight(dataset,hotel_name,model1,model2,factor) 
+  dataset <-  fc_combined$dataset
+  dataset_error <- dataset %>%
+       group_by_(factor) %>% 
+            # MAE error measurements
+  summarise(MAE_add = sum(abs(fc_add- final_arrivals))/n(),
+            MAE_mul = sum(abs(fc_mul-final_arrivals))/n(),
+            MAE_add_mDOW = sum(abs(fc_add_mDOW -final_arrivals))/n(),
+            !!paste(c("MAE",model1,model2),collapse = "_") := sum(abs(get(paste(c(model1,model2),collapse = ".")) - final_arrivals))/n(),
+  
+            # MAPE error measurements
+            MAPE_add = sum(abs(fc_add - final_arrivals)/final_arrivals)/n(),
+            MAPE_mul = sum(abs(fc_mul - final_arrivals)/final_arrivals)/n(),
+            MAPE_add_mDOW = sum(abs(fc_add_mDOW - final_arrivals)/final_arrivals)/n(),
+            !!paste(c("MAPE",model1,model2),collapse = "_") := sum(abs(get(paste(c(model1,model2),collapse = "."))- final_arrivals)/final_arrivals)/n())
+                                
+return(dataset_error)
+}
+
+# fit combined modle1 and get error result
+result1 <- cross_result(in_compare_dataset,hotelname,"fc_add","fc_hw_a",factor)                     
+
+## MAE, MAPE 
+result1_MAE <- result1[names(result1) %like% "MAE" | names(result1) == factor]
+result1_MAPE <- result1[names(result1) %like% "MAPE" | names(result1) == factor]
+
+
+# fit combined modle2 and get error result
+result2 <- cross_result(in_compare_dataset,hotelname,"fc_add","fc_hw_m",factor)                     
+
+## MAE, MAPE errors
+result2_MAE <- result2[,ncol(result2)-4]
+result2_MAPE <-result2[,ncol(result2)]
+
+
+# fit combined modle3 and get error result
+result3 <- cross_result(in_compare_dataset,hotelname,"fc_add_mDOW","fc_hw_a",factor)                     
+
+## MAE, MAPE errors
+result3_MAE <- result3[,ncol(result2)-4]
+result3_MAPE <-result3[,ncol(result2)]
+
+# final result
+result_MAE <- cbind(result1_MAE,result2_MAE,result3_MAE) 
+result_MAPE <- cbind(result1_MAPE,result2_MAPE,result3_MAPE)
+ 
+ return(list(result_MAE, result_MAPE))
+ 
+}
+
+```
+
+
+###  create out compare dataset function for out sample
+```{r}
+out_compare_dataset <- function(hotelname,factor) {
+# fit combined models to get coefficient from training data
+
+fc1<- fc_combined_weight(in_compare_dataset,hotelname,"fc_add","fc_hw_a",factor) 
+dataset1<-fc1$dataset
+fc2<- fc_combined_weight(in_compare_dataset,hotelname,"fc_add_mDOW","fc_hw_a",factor) 
+dataset2<-fc2$dataset
+fc3<- fc_combined_weight(in_compare_dataset,hotelname,"fc_add_mDOW","fc_hw_m",factor) 
+dataset3<-fc3$dataset
+
+# store the combined model parameters as parameter datasets for later join with out-sample data
+coe_fc_add.fc_hw_a <- dataset1[,c(1,which(names(dataset1) == factor),(ncol(dataset1)-2):ncol(dataset1))] %>% distinct()
+coe_fc_add_mDOW.fc_hw_a <- dataset2[,c(1,which(names(dataset2) == factor),(ncol(dataset2)-2):ncol(dataset2))] %>% distinct()
+coe_fc_add_mDOW.fc_hw_m <- dataset3[,c(1,which(names(dataset3) == factor),(ncol(dataset3)-2):ncol(dataset3))] %>% distinct()
+
+# get out-sample forecast data using hw_additive and hw multiplicative model
+if(hotelname == "GLWST") {
+   hotelno<-1
+} else if (hotelname == "MLKEP") {
+    hotelno<-2
+} else {
+  hotelno<-3}
+
+# result from the best model from ets method
+result_hw_a<-fc_hw_daysprior(hotelno,"additive") %>% rename(fc_hw_a=forecast)
+result_hw_w<-fc_hw_daysprior(hotelno,"multiplicative") %>% rename(fc_hw_m=forecast)
+
+# merge out-sample dataset with the advance booking model
+out_compare_dataset<- valid_dataset %>%
+  select(c("hotel","days_prior_c","month","DOW","days_prior","CONF_DT","stay_date","final_arrivals","fc_naive","fc_add_mDOW","fc_add","fc_mul")) %>%
+  # merge with the hw_additive and hw_multiplicative forecast data
+  merge(result_hw_a, by = c("hotel","CONF_DT","stay_date")) %>%
+  merge(result_hw_w, by = c("hotel","stay_date","CONF_DT","forecast_period"))  %>%
+  # merge with the parameters dataset calculated from in sample dataset
+  merge(coe_fc_add.fc_hw_a, by = c("hotel",factor)) %>%
+  merge(coe_fc_add_mDOW.fc_hw_a, by = c("hotel",factor))  %>%
+  merge(coe_fc_add_mDOW.fc_hw_m, by = c("hotel",factor))  %>% 
+  filter(days_prior!=0)  %>%  # filter out final_day forecast
+
+  # model combined fc_add and fc_hw_a 
+  mutate(fc_add.fc_hw_a = interc.fc_add.fc_hw_a + coef1.fc_add.fc_hw_a*fc_add + coef2.fc_add.fc_hw_a*fc_hw_a ) %>% 
+  # model combined fc_mDOW and fc_hw_a 
+  mutate(fc_add_mDOW.fc_hw_a = interc.fc_add_mDOW.fc_hw_a + coef1.fc_add_mDOW.fc_hw_a*fc_add_mDOW + coef2.fc_add_mDOW.fc_hw_a *fc_hw_a ) %>%
+  # model combined fc_mDOW and fc_hw_m
+  mutate(fc_add_mDOW.fc_hw_m = interc.fc_add_mDOW.fc_hw_m + coef1.fc_add_mDOW.fc_hw_m*fc_add_mDOW + coef2.fc_add_mDOW.fc_hw_m *fc_hw_m )  %>% select(-(16:24))  # drop columns with the coefficient datas
+  # drop NA rows from the out compare dataset
+  out_compare_dataset <- na.omit(out_compare_dataset)
+
+return(out_compare_dataset)
+}
+
+
+```
+
+### create  errors comparision function for out-sample
+```{r}
+out_crosss_result_error <- function(hotelname,factor) {
+  result_hotel <- out_compare_dataset(hotelname,factor) %>% 
+  group_by(forecast_period,hotel) %>% 
+            # MAE error measurements
+  summarise(MAE_naive =  sum(abs(fc_naive- final_arrivals))/n(),
+            MAE_add = sum(abs(fc_add- final_arrivals))/n(),
+            MAE_mul = sum(abs(fc_mul-final_arrivals))/n(),
+            MAE_add_mDOW = sum(abs(fc_add_mDOW-final_arrivals))/n(),
+            MAE_fc_add.fc_hw_a = sum(abs(fc_add.fc_hw_a-final_arrivals))/n(),
+            MAE_fc_add_mDOW.fc_hw_a = sum(abs(fc_add_mDOW.fc_hw_a-final_arrivals))/n(),
+            MAE_fc_add_mDOW.fc_hw_m = sum(abs(fc_add_mDOW.fc_hw_m-final_arrivals))/n(),
+            
+            # MAPE error measurements
+            MAPE_add = sum(abs(fc_add - final_arrivals)/final_arrivals)/n(),
+            MAPE_mul = sum(abs(fc_mul - final_arrivals)/final_arrivals)/n(),
+            MAPE_add_mDOW = sum(abs(fc_add_mDOW - final_arrivals)/final_arrivals)/n(),
+            MAPE_fc_add.fc_hw_a = sum(abs(fc_add.fc_hw_a-final_arrivals)/final_arrivals)/n(),
+            MAPE_fc_add_mDOW.fc_hw_a = sum(abs(fc_add_mDOW.fc_hw_a-final_arrivals)/final_arrivals)/n(),
+            MAPE_fc_add_mDOW.fc_hw_m = sum(abs(fc_add_mDOW.fc_hw_m-final_arrivals)/final_arrivals)/n(),
+            
+            # MASE error measurements compared to naive model
+            MASE_add = MAE_add/MAE_naive,
+            MASE_mul = MAE_mul/MAE_naive,
+            MASE_add_mDOW = MAE_add_mDOW/MAE_naive,
+            MASE_fc_add.fc_hw_a = MAE_fc_add.fc_hw_a/MAE_naive,
+            MASE_fc_add_mDOW.fc_hw_a = MAE_fc_add_mDOW.fc_hw_a/MAE_naive, 
+            MASE_fc_add_mDOW.fc_hw_m = MAE_fc_add_mDOW.fc_hw_m/MAE_naive)
+
+
+result_MAE <- result_hotel[names(result_hotel) %like% "MAE" | names(result_hotel) == "forecast_period"] 
+result_MAPE <- result_hotel[names(result_hotel) %like% "MAPE" | names(result_hotel) == "forecast_period"]
+result_MASE <- result_hotel[names(result_hotel) %like% "MASE" | names(result_hotel) == "forecast_period"] 
+
+return(list(result_MAE,result_MAPE,result_MASE))
+
+}
+
+```
+
+
+## merge advanced booking model,  hw_add and hw_mul forecaste results as in_compare_dataset 
+```{r}
+# initiate the forecast from the least time range for damp and seasonal forecast using hw_add
+result_hw_a_1<-fc_hw_loop("2008-05-01","2008-05-17",1,"2008-05-18","2009-07-31", "additive")
+result_hw_a_2<-fc_hw_loop("2008-05-01","2008-05-17",2,"2008-05-18","2009-07-31", "additive") 
+result_hw_a_3<-fc_hw_loop("2008-05-01","2008-05-17",3,"2008-05-18","2009-07-31", "additive")
+                      
+result_hw_a_daysprior = rbind(result_hw_a_1,result_hw_a_2,result_hw_a_3) %>% rename(fc_hw_a = forecast)
+
+# initiate the forecast from the least time range for damp and seasonal forecast using hw_mul
+result_hw_m_1<-fc_hw_loop("2008-05-01","2008-05-17",1,"2008-05-18","2009-07-31", "multiplicative")
+result_hw_m_2<-fc_hw_loop("2008-05-01","2008-05-17",2,"2008-05-18","2009-07-31", "multiplicative") 
+result_hw_m_3<-fc_hw_loop("2008-05-01","2008-05-17",3,"2008-05-18","2009-07-31", "multiplicative")
+                      
+result_hw_m_daysprior = rbind(result_hw_m_1,result_hw_m_2,result_hw_m_3) %>% rename(fc_hw_m = forecast)
+
+# merged with the in-sample dataset from the advance booking model
+in_compare_dataset<- training_dataset %>%
+  select(c("hotel","days_prior_c","DOW","days_prior","CONF_DT","stay_date","final_arrivals","fc_add_mDOW","fc_add","fc_mul")) %>%
+  merge(result_hw_a_daysprior, by=c("hotel","CONF_DT","stay_date","days_prior")) %>%
+  merge(result_hw_m_daysprior, by=c("hotel","CONF_DT","stay_date","days_prior")) %>% 
+  filter(days_prior!=0)  # filter out final_day forecast
+
+```
+
+
+## GLWST 
+
+
+### try different combinations of models and fit weight for each combined model using regression
+```{r}
+# by days prior category
+## fc_add and fc_hw_a
+fc1<- fc_combined_weight(in_compare_dataset,"GLWST","fc_add","fc_hw_a","days_prior_c") 
+weight1 <- list.remove(fc1,c("dataset")) %>% print()
+#fc1$dataset
+
+## fc_add_mDOW and fc_hw_a
+fc2<- fc_combined_weight(in_compare_dataset,"GLWST","fc_add_mDOW","fc_hw_a","days_prior_c") 
+weight2 <- list.remove(fc2,c("dataset")) %>% print()
+#fc3$dataset
+
+## fc_add_mDOW and fc_hw_mul
+fc3<- fc_combined_weight(in_compare_dataset,"GLWST","fc_add_mDOW","fc_hw_m","days_prior_c") 
+weight3 <- list.remove(fc3,c("dataset")) %>% print()
+#fc4$dataset
+
+
+# by DOW
+## fc_add and fc_hw_a
+fc1<- fc_combined_weight(in_compare_dataset,"GLWST","fc_add","fc_hw_a","DOW") 
+weight1 <- list.remove(fc1,c("dataset")) %>% print()
+#fc1$dataset
+
+## fc_add_mDOW and fc_hw_a
+fc2<- fc_combined_weight(in_compare_dataset,"GLWST","fc_add_mDOW","fc_hw_a","DOW") 
+weight2 <- list.remove(fc2,c("dataset")) %>% print()
+#fc2$dataset
+
+## fc_add_mDOW and fc_hw_mul
+fc3<- fc_combined_weight(in_compare_dataset,"GLWST","fc_add_mDOW","fc_hw_m","DOW") 
+weight3 <- list.remove(fc3,c("dataset")) %>% print()
+#fc3$dataset
+```
+**Observations**
+
++ hotel GLWST: across the three model combinations, advanced booking models always have a larger weight than holt-winter method regardless of the days prior category or days of week
+
+### compare result errors from advance and combined models using training data
+
+```{r}
+# by days prior category
+cross_result_error("GLWST","days_prior_c")
+
+
+# by day of week
+cross_result_error("GLWST","DOW")
+```
+
+### out-sample compare dataset
+```{r}
+# by days prior category
+G_outdata_dpr <-out_compare_dataset("GLWST","days_prior_c")
+head(G_outdata_dpr)
+nrow(G_outdata_dpr)
+
+# by DOW
+G_outdata_DOW <-out_compare_dataset("GLWST","DOW")
+head(G_outdata_DOW)
+nrow(G_outdata_DOW)
+
+```
+
+
+### out-sample result errors accross models
+```{r}
+# by days prior category
+out_crosss_result_error("GLWST","days_prior_c")
+
+# by DOW 
+out_crosss_result_error("GLWST","DOW")
+```
+**Observations**
+
++ combined model perform better using the DOW bucket than using the days prior bucket for hotel GLWST, and it outperform the additive model based on month and days of week 5 out of 9. Both models are more accurate than the naive forecast.
++ among the combined model, the advanced booking model additive method based on month and day of week & holt-winter multiplicative method combined model has an overall lowest MASE value.
+
+
+## MLKEP
+
+### try different combinations of models and fit weight for each combined model using regression
+```{r}
+# by days prior category
+## fc_add and fc_hw_a
+fc1<- fc_combined_weight(in_compare_dataset,"MLKEP","fc_add","fc_hw_a","days_prior_c") 
+weight1 <- list.remove(fc1,c("dataset")) %>% print()
+#fc1$dataset
+
+## fc_add_mDOW and fc_hw_a
+fc2<- fc_combined_weight(in_compare_dataset,"MLKEP","fc_add_mDOW","fc_hw_a","days_prior_c") 
+weight2 <- list.remove(fc2,c("dataset")) %>% print()
+#fc3$dataset
+
+## fc_add_mDOW and fc_hw_mul
+fc3<- fc_combined_weight(in_compare_dataset,"MLKEP","fc_add_mDOW","fc_hw_m","days_prior_c") 
+weight3 <- list.remove(fc3,c("dataset")) %>% print()
+#fc4$dataset
+
+
+# by DOW
+## fc_add and fc_hw_a
+fc1<- fc_combined_weight(in_compare_dataset,"MLKEP","fc_add","fc_hw_a","DOW") 
+weight1 <- list.remove(fc1,c("dataset")) %>% print()
+#fc1$dataset
+
+## fc_add_mDOW and fc_hw_a
+fc2<- fc_combined_weight(in_compare_dataset,"MLKEP","fc_add_mDOW","fc_hw_a","DOW") 
+weight2 <- list.remove(fc2,c("dataset")) %>% print()
+#fc2$dataset
+
+## fc_add_mDOW and fc_hw_mul
+fc3<- fc_combined_weight(in_compare_dataset,"MLKEP","fc_add_mDOW","fc_hw_m","DOW") 
+weight3 <- list.remove(fc3,c("dataset")) %>% print()
+
+#fc3$dataset
+```
+**Observations**
+
++ hotel WARUK: across the three model combinations, advanced booking models always have a larger weight than holt-winter method regardless of the days prior category or the Day of Week
+`
+
+### compare result errors from advance and combined models using training data
+
+```{r}
+# by days prior category
+cross_result_error("MLKEP","days_prior_c")
+
+# by day of week
+cross_result_error("MLKEP","DOW")
+```
+
+### out-sample compare dataset
+```{r}
+# by days prior category
+head(out_compare_dataset("MLKEP","days_prior_c"))
+
+# by DOW
+head(out_compare_dataset("MLKEP","DOW"))
+
+```
+
+
+### out-sample result errors accross models
+```{r}
+# by days prior category
+out_crosss_result_error("MLKEP","days_prior_c")
+
+# by DOW 
+out_crosss_result_error("MLKEP","DOW")
+```
+**Observations**
+
++ among the combined model, the advanced booking model additive method based on month and day of week & holt-winter multiplicative method combined model has an overall lowest MASE value.
++ compare to the advanced booking model additive method based on month and day of week, the advanced booking model additive method based on month and day of week & holt-winter multiplicative method combined model yields slightly better result when forecast 1month November, January and April. However, both model outperform naive forecast 5 out of 9 times.
+
+
+## WARUK
+
+
+### try different combinations of models and fit weight for each combined model using regression
+```{r}
+# by days prior category
+## fc_add and fc_hw_a
+fc1<- fc_combined_weight(in_compare_dataset,"WARUK","fc_add","fc_hw_a","days_prior_c") 
+weight1 <- list.remove(fc1,c("dataset")) %>% print()
+#fc1$dataset
+
+## fc_add_mDOW and fc_hw_a
+fc2<- fc_combined_weight(in_compare_dataset,"WARUK","fc_add_mDOW","fc_hw_a","days_prior_c") 
+weight2 <- list.remove(fc2,c("dataset")) %>% print()
+#fc3$dataset
+
+## fc_add_mDOW and fc_hw_mul
+fc3<- fc_combined_weight(in_compare_dataset,"WARUK","fc_add_mDOW","fc_hw_m","days_prior_c") 
+weight3 <- list.remove(fc3,c("dataset")) %>% print()
+#fc4$dataset
+
+
+# by DOW
+## fc_add and fc_hw_a
+fc1<- fc_combined_weight(in_compare_dataset,"WARUK","fc_add","fc_hw_a","DOW") 
+weight1 <- list.remove(fc1,c("dataset")) %>% print()
+#fc1$dataset
+
+## fc_add_mDOW and fc_hw_a
+fc2<- fc_combined_weight(in_compare_dataset,"WARUK","fc_add_mDOW","fc_hw_a","DOW") 
+weight2 <- list.remove(fc2,c("dataset")) %>% print()
+#fc2$dataset
+
+## fc_add_mDOW and fc_hw_mul
+fc3<- fc_combined_weight(in_compare_dataset,"WARUK","fc_add_mDOW","fc_hw_m","DOW") 
+weight3 <- list.remove(fc3,c("dataset")) %>% print()
+#fc3$dataset
+```
+`
+### compare result errors from advance and combined models using training data
+
+```{r}
+# by days prior category
+cross_result_error("WARUK","days_prior_c")
+
+# by day of week
+cross_result_error("WARUK","DOW")
+```
+
+### out-sample compare dataset
+```{r}
+# by days prior category
+head(out_compare_dataset("WARUK","days_prior_c"))
+
+# by DOW
+head(out_compare_dataset("WARUK","DOW"))
+```
+
+### out-sample result errors accross models
+```{r row.print=20}
+# by days prior category
+out_crosss_result_error("WARUK","days_prior_c")
+
+# by DOW 
+out_crosss_result_error("WARUK","DOW")
+```
+**Observations**
+
++ while using the DOW buckets method, compared the to the best additive method based on month and day of week, the combined model of holt-winter additive method combined with additive model has an overall lowest MASE value for the WARUK hotel
+
+
+# Neural Network
+
+## preprocess dataset
+
+```{r}
+  nn_dataset <- filled_data_full %>% 
+  mutate(month = as.factor(month(month)),quarter= as.factor(quarter(quarter))) %>% 
+  filter(days_prior!=0)  # filter out final_day forecast
+```
+
+### Create functions and models
+```{r}
+lag_booking <- function(hotelname,lagday) {
+  d_m <-nn_dataset %>% filter(hotel == hotelname) %>% select(c(stay_date,final_arrivals)) %>% distinct() %>% rename(lagdate = stay_date, date_book = final_arrivals)
+
+  lag_booking<- nn_dataset %>% filter(hotel == hotelname) %>% mutate(lagdate = stay_date - lagday) %>% left_join(d_m,by = "lagdate") %>% select(date_book) %>%  rename(!!paste0("lag",lagday) := date_book)
+
+  return(lag_booking)
+}
+
+```
+
+## GLWST
+
+### create nn dataset
+```{r}
+set.seed(12345)
+
+#training_data <-  filled_data_full %>% filter(stay_date < '2009-11-1') # 2008-05-01 to 2009-10-31
+#test_data <-  filled_data_full %>% filter(stay_date >= '2009-11-1')
+
+
+# Choose lagday for the hotel
+lagday <- c(1,2,3,4,5,6,7,14,21,364)
+
+Mod_data_G <- cbind(nn_dataset[nn_dataset[, "hotel"] =="GLWST",],data.frame(lapply(lagday,lag_booking,hotelname="GLWST"))) %>% select(c("stay_date","CONF_DT","cum_bookings","final_arrivals","days_prior","lag1","lag2","lag3","lag4","lag5","lag6","lag7","lag14","lag21","lag364"))
+Mod_data_G <- Mod_data_G %>% mutate(fc_naive=Mod_data_G$lag364 )
+
+# check NA in columns
+apply(Mod_data_G,2,function(x) sum(is.na(x)))
+
+# omit NA in columns
+Mod_data_G <-  na.omit(Mod_data_G) 
+
+
+#scaled variables except dummy and denpendent variables
+scaled_variables <- preProcess(Mod_data_G[,-c(4,ncol(Mod_data_G))])
+NN_scaled_G <- Mod_data_G_scaled <- predict(scaled_variables,Mod_data_G)
+
+# transfer dummy variables
+#NN_scaled_G  <- fastDummies::dummy_cols(Mod_data_G_scaled,remove_first_dummy = TRUE,select_columns = c("DOW","month","quarter")) 
+
+
+```
+
+### train training dataset
+```{r}
+# Training dataset
+NN_train_G <- NN_scaled_G %>% filter(stay_date < '2009-11-1')
+
+# check variables in the dataset
+glimpse(NN_train_G)
+
+
+# Fit the modle
+n <- names(NN_train_G)
+f <- as.formula(paste("final_arrivals ~", paste(n[!n %in% c("final_arrivals","stay_date","CONF_DT","fc_naive")], collapse = " + ")))
+
+
+# method 1
+nn_fit_G1 <- neuralnet(f,NN_train_G,hidden=c(0),linear.output=T,threshold=100,lifesign="full",lifesign.step=50)
+
+
+#plot(nn_fit_G1)
+result_train_G <- data.frame(NN_train_G$stay_date, NN_train_G$CONF_DT, nn_fit_G1$net.result,"GLWST")
+names(result_train_G)= c("stay_date", "CONF_DT","fc_nn","hotel")
+
+
+```
+
+### fit the test dataset
+```{r row.print=20}
+# Test dataset
+
+NN_test_G <- NN_scaled_G %>% filter(stay_date >= '2009-11-1')
+
+# check variables in the dataset
+#glimpse(NN_testdataset_G )
+
+# check NA in columns
+#apply(NN_test_G,2,function(x) sum(is.na(x)))
+
+# forecast the training model
+NN_pred_test_G1 <- neuralnet::compute(nn_fit_G1,NN_test_G[-c(4)])
+result_test_G<- data.frame(stay_date = NN_test_G$stay_date, CONF_DT = NN_test_G$CONF_DT,actual= NN_test_G$final_arrivals, fc_nn = NN_pred_test_G1$net.result,fc_naive =NN_test_G$fc_naive)
+
+
+# merge dataset as the daysprior format
+result_test_NN_G <- fc_hw_daysprior(1,"additive") %>% select(c("stay_date","CONF_DT","forecast_period") )%>% left_join(result_test_G, by = c("stay_date","CONF_DT")) %>% na.omit()  %>% cbind(hotel="GLWST")
+
+# calculate NN models errors 
+nn_result_out_G <- result_test_NN_G  %>%
+group_by(forecast_period) %>% 
+            # MAE error measurements
+  summarise( MAE_nn = sum(abs(actual-fc_nn))/n(),
+             MAE_naive = sum(abs(actual-fc_naive))/n(),
+            # MAPE error measurements
+             MAPE_nn = sum(abs(actual-fc_nn)/actual)/n(),
+            
+            # MASE error measurements compared to naive model
+             MASE_nn = MAE_nn/MAE_naive)
+
+nn_result_out_G<-txtRound(nn_result_out_G[,-1],2)
+nn_result_out_G <- data.frame(forecast_period=fc_timestamp_out,nn_result_out_G) 
+htmlTable(nn_result_out_G)
+
+
+
+```
+
+
+
+## MLKEP
+
+### create nn dataset
+```{r}
+set.seed(12345)
+
+#training_data <-  filled_data_full %>% filter(stay_date < '2009-11-1') # 2008-05-01 to 2009-10-31
+#test_data <-  filled_data_full %>% filter(stay_date >= '2009-11-1')
+
+
+# Choose lagday for the hotel
+lagday <- c(1,2,3,4,5,6,7,14,21,364)
+
+Mod_data_M <- cbind(nn_dataset[nn_dataset[, "hotel"] =="MLKEP",],data.frame(lapply(lagday,lag_booking,hotelname="MLKEP"))) %>% select(c("stay_date","CONF_DT","cum_bookings","final_arrivals","days_prior","lag1","lag2","lag3","lag4","lag5","lag6","lag7","lag14","lag21","lag364"))
+Mod_data_M <- Mod_data_M %>% mutate(fc_naive=Mod_data_M$lag364 )
+
+# check NA in columns
+apply(Mod_data_M,2,function(x) sum(is.na(x)))
+
+# omit NA in columns
+Mod_data_M <-  na.omit(Mod_data_M) 
+
+
+#scaled variables except dummy and denpendent variables
+scaled_variables <- preProcess(Mod_data_M[,-c(4,ncol(Mod_data_M))])
+NN_scaled_M <- Mod_data_M_scaled <- predict(scaled_variables,Mod_data_M)
+
+# transfer dummy variables
+#NN_scaled_G  <- fastDummies::dummy_cols(Mod_data_G_scaled,remove_first_dummy = TRUE,select_columns = c("DOW","month","quarter")) 
+
+
+```
+
+### train the dataset
+```{r}
+# Training dataset
+NN_train_M <- NN_scaled_M %>% filter(stay_date < '2009-11-1')
+
+# check variables in the dataset
+#glimpse(NN_train_M)
+
+
+# Fit the modle
+n <- names(NN_train_M)
+f <- as.formula(paste("final_arrivals ~", paste(n[!n %in% c("final_arrivals","stay_date","CONF_DT","fc_naive")], collapse = " + ")))
+
+
+# method 1
+nn_fit_M1 <- neuralnet(f,NN_train_M,hidden=c(0),linear.output=T,threshold=100,lifesign="full",lifesign.step=50)
+
+#plot(nn_fit_M1)
+result_train_M <- data.frame(NN_train_M$stay_date, NN_train_M$CONF_DT, nn_fit_M1$net.result,"MLKEP")
+names(result_train_M)= c("stay_date", "CONF_DT","fc_nn","hotel") 
+
+
+```
+
+### fit the dataset
+```{r row.print=20}
+# Test dataset
+
+NN_test_M <- NN_scaled_M %>% filter(stay_date >= '2009-11-1')
+
+# check variables in the dataset
+#glimpse(NN_testdataset_M )
+
+# check NA in columns
+#apply(NN_test_M,2,function(x) sum(is.na(x)))
+
+# forecast the training model
+NN_pred_test_M1 <- neuralnet::compute(nn_fit_M1,NN_test_M[-c(4)])
+result_test_M1<- data.frame(stay_date = NN_test_M$stay_date, CONF_DT = NN_test_M$CONF_DT,actual= NN_test_M$final_arrivals, fc_nn = NN_pred_test_M1$net.result,fc_naive =NN_test_M$fc_naive)
+
+
+# merge dataset as the daysprior format
+result_test_NN_M <- fc_hw_daysprior(2,"additive") %>% select(c("stay_date","CONF_DT","forecast_period") )%>% left_join(result_test_M1, by = c("stay_date","CONF_DT")) %>% na.omit() %>% cbind(hotel="MLKEP")
+
+
+# calculate NN models errors 
+nn_result_out_M <-result_test_NN_M  %>%
+group_by(forecast_period) %>% 
+            # MAE error measurements
+  summarise( MAE_nn = sum(abs(actual-fc_nn))/n(),
+             MAE_naive  = sum(abs(actual-fc_naive))/n(),
+            # MAPE error measurements
+            MAPE_nn = sum(abs(actual-fc_nn)/actual)/n(),
+            
+            # MASE error measurements compared to naive model
+            MASE_nn = MAE_nn/MAE_naive)
+
+nn_result_out_M<-txtRound(nn_result_out_M[,-1],2)
+nn_result_out_M <- data.frame(forecast_period=fc_timestamp_out,nn_result_out_M) 
+htmlTable(nn_result_out_M)
+
+
+```
+
+## WARUK
+### create nn dataset
+```{r}
+set.seed(12345)
+
+#training_data <-  filled_data_full %>% filter(stay_date < '2009-11-1') # 2008-05-01 to 2009-10-31
+#test_data <-  filled_data_full %>% filter(stay_date >= '2009-11-1')
+
+
+# Choose lagday for the hotel
+lagday <- c(1,2,3,4,5,6,7,14,21,364)
+
+Mod_data_W <- cbind(nn_dataset[nn_dataset[, "hotel"] =="WARUK",],data.frame(lapply(lagday,lag_booking,hotelname="WARUK"))) %>% select(c("stay_date","CONF_DT","cum_bookings","final_arrivals","days_prior","lag1","lag2","lag3","lag4","lag5","lag6","lag7","lag14","lag21","lag364"))
+Mod_data_W <- Mod_data_W %>% mutate(fc_naive=Mod_data_W$lag364 )
+
+# check NA in columns
+apply(Mod_data_W,2,function(x) sum(is.na(x)))
+
+# omit NA in columns
+Mod_data_W <-  na.omit(Mod_data_W) 
+
+
+#scaled variables except dummy and denpendent variables
+scaled_variables <- preProcess(Mod_data_W[,-c(4,ncol(Mod_data_W))])
+NN_scaled_W <- Mod_data_W_scaled <- predict(scaled_variables,Mod_data_W)
+
+# transfer dummy variables
+#NN_scaled_G  <- fastDummies::dummy_cols(Mod_data_G_scaled,remove_first_dummy = TRUE,select_columns = c("DOW","month","quarter")) 
+
+
+```
+
+### train the dataset
+```{r}
+# Training dataset
+NN_train_W <- NN_scaled_W %>% filter(stay_date < '2009-11-1')
+
+# check variables in the dataset
+#glimpse(NN_train_W)
+
+
+# Fit the modle
+n <- names(NN_train_W)
+f <- as.formula(paste("final_arrivals ~", paste(n[!n %in% c("final_arrivals","stay_date","CONF_DT","fc_naive")], collapse = " + ")))
+
+
+# method 1
+nn_fit_W1 <- neuralnet(f,NN_train_W,hidden=c(0),linear.output=T,threshold=100,lifesign="full",lifesign.step=50)
+
+#plot(nn_fit_W1)
+result_train_W <- data.frame(NN_train_W$stay_date, NN_train_W$CONF_DT, nn_fit_W1$net.result,"WARUK")
+names(result_train_W)= c("stay_date", "CONF_DT","fc_nn","hotel") 
+
+```
+
+### fit the dataset
+```{r row.print=20}
+# Test dataset
+
+NN_test_W <- NN_scaled_W %>% filter(stay_date >= '2009-11-1')
+
+# check variables in the dataset
+#glimpse(NN_testdataset_W )
+
+# check NA in columns
+#apply(NN_test_W,2,function(x) sum(is.na(x)))
+
+# forecast the training model
+NN_pred_test_W1 <- neuralnet::compute(nn_fit_W1,NN_test_W[-c(4)])
+result_test_W1<- data.frame(stay_date = NN_test_W$stay_date, CONF_DT = NN_test_W$CONF_DT,actual= NN_test_W$final_arrivals, fc_nn = NN_pred_test_W1$net.result,fc_naive =NN_test_W$fc_naive)
+
+
+# merge dataset as the daysprior format
+result_test_NN_W <- fc_hw_daysprior(3,"additive") %>% select(c("stay_date","CONF_DT","forecast_period") )%>% left_join(result_test_W1, by = c("stay_date","CONF_DT")) %>% na.omit() %>% cbind(hotel="WARUK")
+
+
+# calculate NN models errors 
+nn_result_out_W<- result_test_NN_W %>%
+group_by(forecast_period) %>% 
+            # MAE error measurements
+  summarise( MAE_nn = sum(abs(actual-fc_nn))/n(),
+             MAE_naive  = sum(abs(actual-fc_naive))/n(),
+            # MAPE error measurements
+            MAPE_nn = sum(abs(actual-fc_nn)/actual)/n(),
+            
+            # MASE error measurements compared to naive model
+            MASE_nn = MAE_nn/MAE_naive)
+
+
+nn_result_out_W<-txtRound(nn_result_out_W[,-1],2)
+nn_result_out_W <- data.frame(forecast_period=fc_timestamp_out,nn_result_out_W) 
+htmlTable(nn_result_out_W)
+
+```
+
+# Ensembles model
+
+## data prepocessing
+### define insample dataset function
+```{r}
+in_fitcompare_dataset <- function(hotelname,factor) {
+# fit combined models to get coefficient from training data
+fc1<- fc_combined_weight(in_compare_dataset,hotelname,"fc_add","fc_hw_a",factor) 
+dataset1<-fc1$dataset
+fc2<- fc_combined_weight(in_compare_dataset,hotelname,"fc_add_mDOW","fc_hw_a",factor) 
+dataset2<-fc2$dataset
+fc3<- fc_combined_weight(in_compare_dataset,hotelname,"fc_add_mDOW","fc_hw_m",factor) 
+dataset3<-fc3$dataset
+
+# store the combined model parameters as parameter datasets for later join with out-sample data
+coe_fc_add.fc_hw_a <- dataset1[,c(1,which(names(dataset1) == factor),(ncol(dataset1)-2):ncol(dataset1))] %>% distinct()
+coe_fc_add_mDOW.fc_hw_a <- dataset2[,c(1,which(names(dataset2) == factor),(ncol(dataset2)-2):ncol(dataset2))] %>% distinct()
+coe_fc_add_mDOW.fc_hw_m <- dataset3[,c(1,which(names(dataset3) == factor),(ncol(dataset3)-2):ncol(dataset3))] %>% distinct()
+
+# get out-sample forecast data using hw_additive and hw multiplicative model
+if(hotelname == "GLWST") {
+   hotelno<-1
+} else if (hotelname == "MLKEP") {
+    hotelno<-2
+} else {
+  hotelno<-3}
+
+# calculte the combined-fc result for in sample model
+in_fitcompare_dataset<- in_compare_dataset %>%
+  
+  # merge with the parameters dataset calculated from in sample dataset
+  merge(coe_fc_add.fc_hw_a, by = c("hotel",factor)) %>%
+  merge(coe_fc_add_mDOW.fc_hw_a, by = c("hotel",factor))  %>%
+  merge(coe_fc_add_mDOW.fc_hw_m, by = c("hotel",factor))  %>% 
+  filter(days_prior!=0)  %>%  # filter out final_day forecast
+
+  # model combined fc_add and fc_hw_a 
+  mutate(fc_add.fc_hw_a = interc.fc_add.fc_hw_a + coef1.fc_add.fc_hw_a*fc_add + coef2.fc_add.fc_hw_a*fc_hw_a ) %>% 
+  # model combined fc_mDOW and fc_hw_a 
+  mutate(fc_add_mDOW.fc_hw_a = interc.fc_add_mDOW.fc_hw_a + coef1.fc_add_mDOW.fc_hw_a*fc_add_mDOW + coef2.fc_add_mDOW.fc_hw_a *fc_hw_a ) %>%
+  # model combined fc_mDOW and fc_hw_m
+  mutate(fc_add_mDOW.fc_hw_m = interc.fc_add_mDOW.fc_hw_m + coef1.fc_add_mDOW.fc_hw_m*fc_add_mDOW + coef2.fc_add_mDOW.fc_hw_m *fc_hw_m )   %>% select(-(13:21)) # drop columns with the coefficient datas
+  # drop NA rows from the out compare dataset
+  in_fitcompare_dataset <- na.omit( in_fitcompare_dataset)
+
+return(in_fitcompare_dataset)
+}
+
+```
+
+### create insample and outsample essemble dataset
+```{r}
+# insample fc arrvials from NN model
+NN_infc_dataset <- rbind(result_train_G,result_train_M,result_train_W)
+
+
+# insample fc arrvials from Other models we use in combined models
+Other_infc_dataset <- rbind(in_fitcompare_dataset("GLWST","DOW"),in_fitcompare_dataset("MLKEP","DOW"),in_fitcompare_dataset("WARUK","DOW"))
+Other_infc_dataset2 <- rbind(in_fitcompare_dataset("GLWST","days_prior_c"),in_fitcompare_dataset("MLKEP","days_prior_c"),in_fitcompare_dataset("WARUK","days_prior_c"))
+
+# merge fc from other models  with the nn models
+final_infc_dataset<- merge(Other_infc_dataset,Other_infc_dataset2,by= c(names(Other_infc_dataset[,-(13:15)])),suffixes=c("__DOW","__dpr")) %>% merge(NN_infc_dataset,by = c("stay_date","CONF_DT","hotel"))
+
+names(final_infc_dataset)
+
+# outsample fc arrvials from NN model
+NN_outfc_dataset <- rbind(result_test_NN_G,result_test_NN_M,result_test_NN_W) %>% select("stay_date","CONF_DT","hotel","fc_nn","forecast_period")
+
+
+# outsample fc arrvials from Other models we use in combined models
+Other_outfc_dataset <- rbind(out_compare_dataset("GLWST","DOW"),out_compare_dataset("MLKEP","DOW"),out_compare_dataset("WARUK","DOW"))
+Other_outfc_dataset2 <- rbind(out_compare_dataset("GLWST","days_prior_c"),out_compare_dataset("MLKEP","days_prior_c"),out_compare_dataset("WARUK","days_prior_c"))
+
+# merge fc from other models  with the nn models
+final_outfc_dataset<- merge(Other_outfc_dataset,Other_outfc_dataset2,by= c(names(Other_outfc_dataset[,-(16:18)])),suffixes=c("__DOW","__dpr")) %>% left_join(NN_outfc_dataset,by = c("stay_date","CONF_DT","hotel","forecast_period"))
+
+```
+
+### define outfit error matrix function
+```{r}
+essemble_result_error <- function(dataset) {
+  essemble_error_matix<- dataset %>%
+group_by(forecast_period)  %>%
+           # MAE error measurements
+  summarise(MAE_naive = sum(abs(final_arrivals-fc_naive))/n(),
+            MAE_add = sum(abs(final_arrivals-fc_add))/n(),
+            MAE_mul = sum(abs(final_arrivals-fc_mul))/n(),
+            MAE_add_mDOW = sum(abs(final_arrivals-fc_add_mDOW))/n(),
+            MAE_add.hw_a__DOW = sum(abs(final_arrivals-fc_add.fc_hw_a__DOW))/n(),
+            MAE_add_mDOW.hw_m__DOW = sum(abs(final_arrivals-fc_add_mDOW.fc_hw_m__DOW))/n(),
+            MAE_add.hw_a__dpr = sum(abs(final_arrivals-fc_add.fc_hw_a__dpr))/n(),
+            MAE_add_mDOW.hw_a__dpr = sum(abs(final_arrivals-fc_add_mDOW.fc_hw_a__dpr))/n(),
+            MAE_add_mDOW.hw_m__dpr = sum(abs(final_arrivals-fc_add_mDOW.fc_hw_m__dpr))/n(),
+            MAE_nn = sum(abs(final_arrivals-fc_nn))/n(),
+            MAE_glm_st = sum(abs(final_arrivals-fc_glm_stacked))/n(),
+            # MAPE error measurements
+            MAPE_add = sum(abs(final_arrivals-fc_add)/abs(final_arrivals))/n(),
+            MAPE_mul = sum(abs(final_arrivals-fc_mul)/abs(final_arrivals))/n(),
+            MAPE_add_mDOW = sum(abs(final_arrivals-fc_add_mDOW)/abs(final_arrivals))/n(),
+            MAPE_add.hw_a__DOW = sum(abs(final_arrivals-fc_add.fc_hw_a__DOW)/abs(final_arrivals))/n(),
+            MAPE_add_mDOW.hw_m__DOW = sum(abs(final_arrivals-fc_add_mDOW.fc_hw_m__DOW)/abs(final_arrivals))/n(),
+            MAPE_add.hw_a__dpr = sum(abs(final_arrivals-fc_add.fc_hw_a__dpr)/abs(final_arrivals))/n(),
+            MAPE_add_mDOW.hw_a__dpr = sum(abs(final_arrivals-fc_add_mDOW.fc_hw_a__dpr)/abs(final_arrivals))/n(),
+            MAPE_add_mDOW.hw_m__dpr = sum(abs(final_arrivals-fc_add_mDOW.fc_hw_m__dpr)/abs(final_arrivals))/n(),
+            MAPE_nn = sum(abs(final_arrivals-fc_nn)/abs(final_arrivals))/n(),
+            MAPE_glm_st = sum(abs(final_arrivals-fc_glm_stacked)/abs(final_arrivals))/n(),
+            # MASE error measurements compared to naive model
+            MASE_add =  MAE_add/MAE_naive,
+            MASE_mul =  MAE_mul/MAE_naive,
+            MASE_add_mDOW = MAE_add_mDOW/MAE_naive,
+            MASE_add.hw_a_DOW = MAE_add.hw_a__DOW/MAE_naive,
+            MASE_add_mDOW.hw_m__DOW = MAE_add_mDOW.hw_m__DOW/MAE_naive,
+            MASE_add.hw_a__dpr = MAE_add.hw_a__dpr/MAE_naive,
+            MASE_add_mDOW.hw_a__dpr = MAE_add_mDOW.hw_a__dpr/MAE_naive,
+            MASE_add_mDOW.hw_m__dpr = MAE_add_mDOW.hw_m__dpr/MAE_naive,
+            MASE_nn = MAE_nn/MAE_naive,
+            MASE_glm_st = MAE_glm_st/MAE_naive)
+  
+  return(essemble_error_matix)
+  
+}
+   
+```
+
+## GLWST
+### train the top layer model on the predictions of the bottom layer models that has been made on the insample data
+```{r}
+# Defining the training control
+cvCtrl <- trainControl(method="repeatedcv", repeats=3)
+
+nnetGrid <-  expand.grid(size = seq(from = 1, to = 10, by = 1),
+                        decay = seq(from = 0.1, to = 0.5, by = 0.1))
+
+#Predictors for top layer models 
+final_infc_datase_G<-final_infc_dataset %>% filter(hotel == "GLWST")
+
+predictors_top<-c('fc_add','fc_mul','fc_hw_a','fc_add_mDOW',"fc_add.fc_hw_a__DOW","fc_add_mDOW.fc_hw_a__DOW", "fc_add_mDOW.fc_hw_m__DOW","fc_add.fc_hw_a__dpr","fc_add_mDOW.fc_hw_a__dpr" ,"fc_add_mDOW.fc_hw_m__dpr","fc_nn") 
+outcomeName <- "final_arrivals"
+
+#Neuralnet as top layer model 
+model_glm<- 
+train(final_infc_datase_G[,predictors_top],final_infc_datase_G[,outcomeName],
+      method='glm',trControl=cvCtrl,tuneLength=3)
+```
+
+### using the model fitted in the training dataset to predit the test dataset
+```{r}
+#predict using GBM top layer model
+final_outfc_dataset_G <- final_outfc_dataset %>% filter(hotel == "GLWST")
+
+
+final_outfc_dataset_G$fc_glm_stacked<-predict(model_glm,final_outfc_dataset_G[,predictors_top])
+
+
+# essemble data model result
+essem_result_G<- essemble_result_error(final_outfc_dataset_G)
+essem_result_G_com <- essem_result_G %>% select("MAE_glm_st","MAPE_glm_st","MASE_glm_st")
+essem_result_G_com <- txtRound(essem_result_G_com,2)
+essem_result_G_com <- data.frame(forecast_period = fc_timestamp_out,essem_result_G_com )
+htmlTable(essem_result_G_com)
+
+
+# MAE, MAPE, MASE result
+essem_result_G_MAE <- essem_result_G[names(essem_result_G) %like% "MAE" | names(essem_result_G) == "forecast_period"]
+essem_result_G_MAE 
+essem_result_G_MAPE <- essem_result_G[names(essem_result_G) %like% "MAPE" | names(essem_result_G) == "forecast_period"]
+essem_result_G_MAPE
+essem_result_G_MASE <- essem_result_G[names(essem_result_G) %like% "MASE" | names(essem_result_G) == "forecast_period"]
+essem_result_G_MASE
+```
+
+
+
+## MLKEP
+### train the top layer model on the predictions of the bottom layer models that has been made on the insample data
+```{r}
+# Defining the training control
+cvCtrl <- trainControl(method="repeatedcv", repeats=3)
+
+nnetGrid <-  expand.grid(size = seq(from = 1, to = 10, by = 1),
+                        decay = seq(from = 0.1, to = 0.5, by = 0.1))
+
+#Predictors for top layer models 
+final_infc_datase_M<-final_infc_dataset %>% filter(hotel == "MLKEP")
+
+predictors_top<-c('fc_add','fc_mul','fc_hw_a','fc_add_mDOW',"fc_add.fc_hw_a__DOW","fc_add_mDOW.fc_hw_a__DOW", "fc_add_mDOW.fc_hw_m__DOW","fc_add.fc_hw_a__dpr","fc_add_mDOW.fc_hw_a__dpr" ,"fc_add_mDOW.fc_hw_m__dpr","fc_nn") 
+outcomeName <- "final_arrivals"
+
+#Neuralnet as top layer model 
+model_glm<- 
+train(final_infc_datase_M[,predictors_top],final_infc_datase_M[,outcomeName],
+      method='glm',trControl=cvCtrl,tuneLength=3)
+```
+
+### using the model fitted in the training dataset to predit the test dataset
+```{r}
+#predict using GBM top layer model
+final_outfc_dataset_M <- final_outfc_dataset %>% filter(hotel == "MLKEP")
+
+final_outfc_dataset_M$fc_glm_stacked<-predict(model_glm,final_outfc_dataset_M[,predictors_top])
+
+
+# essemble data model result
+essem_result_M<- essemble_result_error(final_outfc_dataset_M)
+essem_result_M_com <- essem_result_M %>% select("MAE_glm_st","MAPE_glm_st","MASE_glm_st")
+essem_result_M_com <- txtRound(essem_result_M_com,2)
+essem_result_M_com <- data.frame(forecast_period = fc_timestamp_out,essem_result_M_com )
+htmlTable(essem_result_M_com)
+
+# MAE, MAPE, MASE result
+essem_result_M_MAE <- essem_result_M[names(essem_result_M) %like% "MAE" | names(essem_result_M) == "forecast_period"]
+essem_result_M_MAE 
+essem_result_M_MAPE <- essem_result_M[names(essem_result_M) %like% "MAPE" | names(essem_result_M) == "forecast_period"]
+essem_result_M_MAPE
+essem_result_M_MASE <- essem_result_M[names(essem_result_M) %like% "MASE" | names(essem_result_M) == "forecast_period"]
+essem_result_M_MASE
+```
+
+## WARUK
+### train the top layer model on the predictions of the bottom layer models that has been made on the insample data
+```{r}
+# Defining the training control
+cvCtrl <- trainControl(method="repeatedcv", repeats=3)
+
+nnetGrid <-  expand.grid(size = seq(from = 1, to = 10, by = 1),
+                        decay = seq(from = 0.1, to = 0.5, by = 0.1))
+
+#Predictors for top layer models 
+final_infc_datase_W<-final_infc_dataset %>% filter(hotel == "WARUK")
+
+predictors_top<-c('fc_add','fc_mul','fc_hw_a','fc_add_mDOW',"fc_add.fc_hw_a__DOW","fc_add_mDOW.fc_hw_a__DOW", "fc_add_mDOW.fc_hw_m__DOW","fc_add.fc_hw_a__dpr","fc_add_mDOW.fc_hw_a__dpr" ,"fc_add_mDOW.fc_hw_m__dpr","fc_nn") 
+outcomeName <- "final_arrivals"
+
+#Neuralnet as top layer model 
+model_glm<- 
+train(final_infc_datase_G[,predictors_top],final_infc_datase_G[,outcomeName],
+      method='glm',trControl=cvCtrl,tuneLength=3)
+```
+
+### using the model fitted in the training dataset to predit the test dataset
+```{r}
+#predict using GBM top layer model
+final_outfc_dataset_W <- final_outfc_dataset %>% filter(hotel == "WARUK")
+
+final_outfc_dataset_W$fc_glm_stacked<-predict(model_glm,final_outfc_dataset_W[,predictors_top])
+
+
+# essemble data model result
+essem_result_W<- essemble_result_error(final_outfc_dataset_W)
+essem_result_W_com <- essem_result_W %>% select("MAE_glm_st","MAPE_glm_st","MASE_glm_st")
+essem_result_W_com <- txtRound(essem_result_W[-1],2)
+essem_result_W_com <- data.frame(forecast_period = fc_timestamp_out,essem_result_W_com )
+htmlTable(essem_result_W_com)
+  
+# MAE, MAPE, MASE result
+essem_result_W_MAE <- essem_result_W[names(essem_result_W) %like% "MAE" | names(essem_result_W) == "forecast_period"]
+essem_result_W_MAE
+
+essem_result_W_MAPE <- essem_result_W[names(essem_result_W) %like% "MAPE" | names(essem_result_W) == "forecast_period"]
+essem_result_W_MAPE
+essem_result_W_MASE <- essem_result_W[names(essem_result_W) %like% "MASE" | names(essem_result_W) == "forecast_period"]
+essem_result_W_MASE
+```
+
+
+# final results
+## GLWST
+```{r row.print=20}
+# calculate final errors across all models
+ts_models_result <- fc_result_across2(1,7,1,2,3,1,1,3,1,1)
+
+#MAE
+## merge data set
+final_result_MAE<- essem_result_G_MAE %>% merge(ts_models_result$MAE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MAE) <- sub("MAE_", "", names(final_result_MAE))              
+final_result_MAE_G<- cbind(final_result_MAE,best_model = colnames(final_result_MAE)[apply(final_result_MAE,1,which.min)]) 
+final_result_MAE_G
+
+#MAPE
+## merge data set
+final_result_MAPE<- essem_result_G_MAPE %>% merge(ts_models_result$MAPE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MAPE) <- sub("MAPE_", "", names(final_result_MAPE))              
+final_result_MAPE_G<- cbind(final_result_MAPE,best_model = colnames(final_result_MAPE)[apply(final_result_MAPE,1,which.min)]) 
+final_result_MAPE_G
+
+
+#MASE
+## merge data set
+final_result_MASE<- essem_result_G_MASE %>% merge(ts_models_result$MASE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MASE) <- sub("MASE_", "", names(final_result_MASE))              
+final_result_MASE_G<- cbind(final_result_MASE,best_model = colnames(final_result_MASE)[apply(final_result_MASE,1,which.min)]) 
+final_result_MASE_G
+
+write.csv(final_result_MASE_G,"final_result_comp_G")
+```
+
+
+## MLKEP
+```{r row.print=20}
+# calculate final errors across all models
+ts_models_result <- fc_result_across2(2,1,0,21,7,0,0,0,1,2) 
+
+#MAE
+## merge data set
+final_result_MAE<- essem_result_M_MAE %>% merge(ts_models_result$MAE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MAE) <- sub("MAE_", "", names(final_result_MAE))              
+final_result_MAE_M<- cbind(final_result_MAE,best_model = colnames(final_result_MAE)[apply(final_result_MAE,1,which.min)]) 
+final_result_MAE_M
+
+#MAPE
+## merge data set
+final_result_MAPE<- essem_result_M_MAPE %>% merge(ts_models_result$MAPE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MAPE) <- sub("MAPE_", "", names(final_result_MAPE))              
+final_result_MAPE_M<- cbind(final_result_MAPE,best_model = colnames(final_result_MAPE)[apply(final_result_MAPE,1,which.min)]) 
+final_result_MAPE_M
+
+
+#MASE
+## merge data set
+final_result_MASE<- essem_result_M_MASE %>% merge(ts_models_result$MASE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MASE) <- sub("MASE_", "", names(final_result_MASE))              
+final_result_MASE_M<- cbind(final_result_MASE,best_model = colnames(final_result_MASE)[apply(final_result_MASE,1,which.min)]) 
+final_result_MASE_M
+
+write.csv(final_result_MASE_M,"final_result_comp_M")
+```
+
+
+## WARUK
+```{r row.print=20}
+# calculate final errors across all models
+ts_models_result <- fc_result_across2(3,6,1,1,8,0,1,2,1,1)
+
+#MAE
+## merge data set
+final_result_MAE<- essem_result_W_MAE %>% merge(ts_models_result$MAE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MAE) <- sub("MAE_", "", names(final_result_MAE))              
+final_result_MAE_W<- cbind(final_result_MAE,best_model = colnames(final_result_MAE)[apply(final_result_MAE,1,which.min)]) 
+final_result_MAE_W
+
+#MAPE
+## merge data set
+final_result_MAPE<- essem_result_W_MAPE %>% merge(ts_models_result$MAPE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MAPE) <- sub("MAPE_", "", names(final_result_MAPE))              
+final_result_MAPE_W<- cbind(final_result_MAPE,best_model = colnames(final_result_MAPE)[apply(final_result_MAPE,1,which.min)]) 
+final_result_MAPE_W
+
+
+
+#MASE
+## merge data set
+final_result_MASE<- essem_result_W_MASE %>% merge(ts_models_result$MASE,by="forecast_period",all=FALSE)
+
+## rename columns
+names(final_result_MASE) <- sub("MASE_", "", names(final_result_MASE))              
+final_result_MASE_W<- cbind(final_result_MASE,best_model = colnames(final_result_MASE)[apply(final_result_MASE,1,which.min)]) 
+
+final_result_MASE_W
+
+write.csv(final_result_MASE_W,"final_result_comp_W")
+```
+
+
+
