@@ -1,0 +1,61 @@
+
+
+---
+output: html_document
+---
+
+#### **To: Manager of Financial Management Company A**  
+  
+#### **From: Ying Xue**  
+  
+#### **Date: `r format(Sys.time(), '%B %d, %Y')`**   
+  
+#### **RE: Saving Motivation-based Marketing Targeting Strategy for Retirement Plan Products**  
+
+
+```{r echo = FALSE, message= FALSE}
+# Clear environment of variables and functions
+rm(list = ls(all = TRUE)) 
+
+# Clear environmet of packages
+if(is.null(sessionInfo()$otherPkgs) == FALSE)lapply(paste("package:", names(sessionInfo()$otherPkgs), sep=""), detach, character.only = TRUE, unload = TRUE)
+
+```
+
+
+```{r echo = FALSE}
+# Load saved image of the office Tech Appendix workspace
+load("Final_TA.RData")
+```
+**Introduction: What Drives Motivation for Saving for Retirement?**
+
+In order to create effective message to encourage people to purchase financial products and increase their retirement income, we need to identify individuals who care most about their retirement plan and are willing to pay for financial products. I first grouped individuals into 5 categories based on their valuation of financial security and connected these categories to the participation rate of retirement plan. The figure below exhibits that the impacts of financial security value is positive on participation rate of retirement plan, as the rate increases from less than 50%, among those who think it is not important, to more than 70% who acknowledged financial security as extreme important goal in their life. 
+
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+g1
+```
+
+Another indicator of interest in retirement plan is age. The simple intuition is elder people are closer to the retirement age, as a result saving for the future is a more realistic question to them. For example, the figure below shows that people in their 50s and 60s have the highest participation rate in retirement plan, suggesting that people of these age have a strong motivation to save for their lives when retirement begins. 
+
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+g3
+```
+
+Although valuation of financial security and age are identified as relevant motivation for saving for retirement, we were not able to extend the scope of the current analysis to a larger population who we could not ask directly how they value financial security in their life. However, we could relate age to valuation of financial security as age is a more readily available data point. The figure below demonstrates that people in their 50s and 60s value financial security the most in the survey, which reinforced my finding in Figure above that people of these age also have the highest participation rate in retirement plan.
+
+
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+g5
+
+```
+
+**Conclusion**
+
+To create effective message to encourage potential customers to purchase financial products for their retirement plan, the Financial Management Company should target people who has the highest valuation of financial security (if this data is available) and people who are in their 50s and 60s,if you have questions or would like to discuss the analysis further. I can also provide my complete analysis with data and code if you would like more detail.
+
+Best regards,
+
+Ying Xue

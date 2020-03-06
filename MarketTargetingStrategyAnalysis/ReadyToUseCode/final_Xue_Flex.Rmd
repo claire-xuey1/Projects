@@ -1,0 +1,85 @@
+---
+title: "Marketing recommendations for Financial Management Company to sell retirement income products "
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+  html_document:
+    df_print: paged
+---
+
+```{r include=FALSE}
+# Course: BUAN 5210
+# Purpose: Illustrate flexdashboard mechanics
+# Author: Ying Xue
+# Date: Mar 21, 2019
+
+```
+
+```{r}
+# library package
+library(flexdashboard)
+library(ggplot2)
+library(plotly)
+# Load saved image of the office Tech Appendix workspace
+load("Final_TA.RData")
+```
+
+
+
+
+Column {data-width=375}
+-----------------------------------------------------------------------
+
+### How participation of the retirement plan related to value of Financial Security? {data-height=700}
+
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+ggplotly(g1)
+
+```
+
+### How participation of the retirement plan related to age? {data-height=700}
+
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+ggplotly(g3)
+
+```
+
+
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### How Value of Financial Security differentiated by age? {data-height=700}
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+ggplotly(g5)
+
+```
+
+### How Value of Financial Security differentiated by marital status?{data-height=400}
+
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+ggplotly(g8)
+
+```
+
+
+Column {data-width=375}
+-----------------------------------------------------------------------
+
+
+### How participation of the retirement plan related to both the Householdincome and marital status?{data-height=400}
+```{r echo = FALSE, include = TRUE}
+# Show the plot that was made in the Technical Appendix and saved in the workspace 
+ggplotly(g6)
+
+```
+
+### Contact Information {data-height=100}
+  
+If you have any question, feel free to contact me [Ying Xue](www.linkedin.com/in/ying-xue-2019/)
+

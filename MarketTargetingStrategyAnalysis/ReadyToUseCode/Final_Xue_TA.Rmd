@@ -1,0 +1,761 @@
+---
+title: "TA"
+author: "Ying Xue"
+date: "3/14/2019"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+---
+
+# Commented Header
+
+```{r}
+# Course: BUAN 5210
+# Title: Technical Appendix
+# Purpose: Suggetion to motivae people to buy the assets managment or retirement product based on Basic EDA and detailed EDA
+# Date: Mar 14th, 2019
+# Author: Ying Xue
+```
+
+
+# Clear Working Environment
+
+```{r setup}
+# Clear environment of variables and functions
+rm(list = ls(all = TRUE)) 
+
+# library package
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(gridExtra)
+library(GGally)
+library(htmlTable)
+library(kableExtra)
+library(janitor)
+library(shiny)
+library(plotly)
+library(scales)
+library(mfx)
+library(MASS)
+```
+
+
+# Load data and prepare for EDA
+
+```{r message=FALSE, error=FALSE, warning=FALSE, fig.width=10}
+# load data
+raw_data <- read_csv("Personal_needs.csv")
+
+# Data Manipulation
+
+# select the columns of interest
+research_data <-dplyr::select(raw_data,FinancialSecurity,tv,intrnet,socmed,charit,excer,garden,impulse,eatout,pubtran,sportfan,commun,envichoi,brandloyal,gender,age,jobstatus,Hhincome,retirement,educ,marstatus)
+
+# remove the rows of na 
+tidy_table <- research_data %>% na.omit() 
+
+# convert character into factor
+tidy_table <- tidy_table %>% mutate(
+  gender = as.factor(gender),
+  jobstatus= as.factor(jobstatus),
+  educ = as.factor(educ),
+  marstatus = as.factor(marstatus),
+  Hhincome = as.factor(Hhincome),
+    
+# rename the category within the Hhincome according to the Census Bureau 2017
+ Cat_Hhincome = case_when(
+ Hhincome == "$20,000-$39,999"| Hhincome == "Below $20,000"~"Pov/Low",     
+ Hhincome == "$40,000-$59,999"|Hhincome == "$40,000-$59,999"|Hhincome == "$60,000-$79,999"|Hhincome == "$80,000-$99,999"|Hhincome == "$100,000-$149,999" ~ "Middle",         
+ Hhincome == "$150,000-$199,999"|Hhincome == "$200,000 & above"~"High"),
+ Cat_Hhincome = as.factor(Cat_Hhincome),
+ 
+# rename the category within the retirement 
+ retirement = case_when(
+ retirement == "$100,000-$149,999" ~ "100k-150k",         
+ retirement == "$20,000-$59,999"~"20k-60k",             
+ retirement == "$200,000-$299,999" ~ "200k-300k",               
+ retirement == "$300,000-$399,999" ~"300k-400k",       
+ retirement == "$400,000-$499,999" ~ "400k-500k",         
+ retirement == "$500,000 and above" ~ ">=500k",          
+ retirement == "$60,000-$99,999" ~ "60k-100k",
+ retirement == "below $20,000"  ~ "<20k",TRUE ~ "NO"),
+ Cat_retirement= case_when(retirement == "NO" ~ "NO", TRUE~"YES"),
+ retirement = as.factor(retirement), Cat_retirement = as.factor( Cat_retirement))
+
+# convert the age into category
+  tidy_table$Cat_age<- cut(tidy_table$age, breaks=c(0,20, 30, 40, 50, 60 ,70,100), right = FALSE,labels=c("<20","20s","30s","40s","50s","60s",">=70"))
+
+# convert FinancialSecurity Motivation into category 
+ tidy_table$Cat_Fin<- cut(tidy_table$FinancialSecurity, breaks=c(2,4,5,8,9,10), right = FALSE,labels=c("not important","slightly important","moderate important","very important","extrem important"))
+
+str(tidy_table) 
+summary(tidy_table) 
+
+
+
+```
+
++ Observations:
++ 4 sections of data : value, behavior, attitude and demographic information
++ 366 observation after ommiting the rows containing na
++ nobody holds negative value towards Financial Security 
++ 5 jobstatus
++ 8 level of household incom
++ 10 levels of retirment plan
++ 6 level of education
++ More than half of the respondents already got a retirement plan,that's the potential customer to sell the product
+
+
+# Basic EDA
+## Univariate Data Exploration
+### Univariate Non-Graphical
+
+```{r}
+#Create function for frequency tables 
+count_table <- function(x,colname){
+   x = enquo(x)
+   kable(
+    tidy_table %>%
+      tabyl(!!x) %>%
+      adorn_totals()%>%
+      adorn_pct_formatting(digits = 0 ),
+      digits = 2,
+      format = "html",
+      align = c("l","c","c"),
+      col.names = c(colname,"Count","Total")
+    )%>%
+  kable_styling(full_width = F)}
+
+#Make count tables for univariate variables for segmentation
+count_table(Cat_Fin,"Value of Financial Security")
+count_table(Cat_age,"Age")
+count_table(Cat_Hhincome,"Household Income") 
+count_table(retirement,"Retirment Plan")
+count_table(marstatus,"Marital Status")
+count_table(gender,"Gender")
+count_table(educ,"Education Attainment")
+
+```
+
++ Finding of the data:
+++ more than 50% of the people think that Financial Security is moderate impotant and have joined a retirement plan and 33% of people think Financial secrutiy is very or extreme important, these maybe potential customers
+
+### Univariate Graphical
+We begin with exploration of the categorical variables.
+
+```{r  }
+# Code histograms using grid.arrange so can see all variables together
+grid.arrange(
+  # distribution by retirement
+  tidy_table %>% 
+      ggplot(aes(retirement))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)), 
+  tidy_table %>% 
+      ggplot(aes(Cat_retirement))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)), 
+ 
+   # distribution by value of Financial Security 
+   tidy_table %>% 
+      ggplot(aes(Cat_Fin))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+    ncol=2
+)
+
+# Demographical Information
+grid.arrange(
+  # distribution by gender
+  tidy_table %>% 
+      ggplot(aes(gender))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+  # distribution by jobstatus
+   tidy_table %>% 
+      ggplot(aes(jobstatus)) +  
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+  # distribution by educ
+   tidy_table %>% 
+      ggplot(aes(educ))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+   # distribution by marstatus
+   tidy_table %>% 
+      ggplot(aes(marstatus))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+   # distribution by Hhincome
+  tidy_table %>% 
+      ggplot(aes(Cat_Hhincome))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+    # distribution by Age
+  tidy_table %>% 
+      ggplot(aes(Cat_age))+
+      geom_bar() + 
+      theme(axis.text.x = element_text(angle=60, hjust=1)),
+
+  
+  ncol=2
+)
+
+```
+
++ Finding of the data:
+++ Most people are with middle or low house holdincome
+++ more than 50% people join the retirement plan but most are witn low balance
+
+Having completed our examination of the categorical variables, we move on to the numeric variables.
+
+```{r message = FALSE}
+# Code histograms using grid.arrange so can see all quant variables together 
+grid.arrange(
+   # Value of Financial Security distribution
+  tidy_table  %>% 
+    ggplot(aes(FinancialSecurity)) +
+      geom_histogram(),
+   # Attitude of Sportfan distribution
+  tidy_table  %>% 
+    ggplot(aes(sportfan)) +
+      geom_histogram(),
+   # Attitude of Community connected distribution
+  tidy_table  %>% 
+    ggplot(aes(commun)) +
+      geom_histogram(),
+   # Attitude of Environment Friendly distribution
+  tidy_table  %>% 
+    ggplot(aes(envichoi)) +
+       geom_histogram(),
+   # Behavior of money on charities
+  tidy_table  %>% 
+    ggplot(aes(charit)) +
+      geom_histogram(),
+   # Behavior of  time on whatching TV distribution
+  tidy_table  %>% 
+    ggplot(aes(tv)) +
+      geom_histogram(),
+   # Behavior of  time on surfing internet distribution
+  tidy_table  %>% 
+    ggplot(aes(intrnet)) +
+       geom_histogram(),
+   # Behavior of  time on social media distribution
+  tidy_table  %>% 
+    ggplot(aes(socmed)) +
+      geom_histogram(),
+  # Behavior of time on exercise distribution
+  tidy_table  %>% 
+    ggplot(aes(excer)) +
+      geom_histogram()
+   
+
+)
+```
+
++ Finding of the data:
+++ Many people are super sports fans and strongly connected to community, the marketing activity may focus on these targets to attract sportsfan family and get higher referrals through members in the community.
+++ Many people spent a lot of time on tv and internet, it canbe the main marketing chennel.
+
+## Multivariate Data Exploration
+### Non-graphical
+
+First, we examine overall characteristics using cross-tabs and table
+
+```{r}
+# education and retirement plan balance
+tidy_table %>% 
+  tabyl(educ,Cat_retirement) %>% 
+  adorn_totals(where = c("row", "col")) %>% 
+  adorn_percentages(denominator = "all") %>%  
+  adorn_pct_formatting(digits = 0)
+
+# gender and retirement plan balance
+tidy_table %>% 
+  tabyl(gender,retirement) %>% 
+  adorn_totals(where = c("row", "col")) %>% 
+  adorn_percentages(denominator = "all") %>%  
+  adorn_pct_formatting(digits = 0)
+
+# household income and retirement plan balance
+tidy_table %>% 
+  tabyl(Cat_Hhincome,Cat_retirement) %>% 
+  adorn_totals(where = c("row", "col")) %>% 
+  adorn_percentages(denominator = "all") %>%  
+  adorn_pct_formatting(digits = 0)
+
+# marital status and Value of Financial Security
+tidy_table %>% 
+  tabyl(marstatus,Cat_Fin) %>% 
+  adorn_totals(where = c("row", "col")) %>% 
+  adorn_percentages(denominator = "all") %>%  
+  adorn_pct_formatting(digits = 0)
+
+# marital status and retirement plan balance
+tidy_table %>% 
+  tabyl(marstatus,Cat_retirement) %>% 
+  adorn_totals(where = c("row", "col")) %>% 
+  adorn_percentages(denominator = "all") %>%  
+  adorn_pct_formatting(digits = 0)
+
+```
+
++ Finding of the data:
+++ For educational attainment, with graduate degree the percentage of joining the retirement plan is three times that of not joining the plan,with college degree the percentage of joining the retirement plan is two times that of not joining the plan.It seems that the higher the educational attainment, the people maybe more willing to join the retirement plan.
+++ For household income, the Middle Income people get the highest retirement plan particaption rate with 38%, and among the middle income group, people are more willing to join the plan with the percentage of joining the plan approximately 3 times higher than not joining the plan
+++ For marital status, among the group of married and widowed people, the probability for retirement plan partipation is higher, and the widowed people value most for finacial security with respondents falls on either very or exremely important.
+
+### graphical
+
+Now, we move on to understanding covariance graphically and to understanding the relationships among numeric variables.
+```{r}
+# Use tile graph to show which group value Financial Security most
+
+ggplotly(p<- tidy_table %>%
+  group_by(gender,Cat_Hhincome) %>% 
+  summarise(Fina = mean(FinancialSecurity)) %>% 
+  ggplot(aes(gender,Cat_Hhincome)) + 
+  geom_tile(aes(fill = -Fina)))
+
+
+ggplotly(p<- tidy_table %>%
+  group_by(marstatus,gender) %>% 
+  summarise(Fina = mean(FinancialSecurity)) %>% 
+  ggplot(aes(marstatus,gender)) + 
+  geom_tile(aes(fill = -Fina)))
+
+ggplotly(p<- tidy_table %>%
+  group_by(marstatus,Cat_age) %>% 
+  summarise(Fina = mean(FinancialSecurity)) %>% 
+  ggplot(aes(marstatus,Cat_age)) + 
+  geom_tile(aes(fill = -Fina)))
+            
+
+ggplotly(p <- tidy_table %>%
+  group_by(educ,marstatus) %>% 
+  summarise(Fina = mean(FinancialSecurity)) %>% 
+  ggplot(aes(educ, marstatus)) + 
+  theme(axis.text.x = element_text(angle=60, hjust=1)) +
+  geom_tile(aes(fill = -Fina)))
+
+
+```
++ Finding of the data:
+++ The following segments of people value Financial Security most: Middleincome Female 7.27, WidowFemale 7.37, Divorced Male 7.73,
+   60s widowed 9, widowed with graduate degree 8.5 with highschool degree 9
+
+
+```{r message = FALSE}
+# Use cor to get the correlation between the variable with interest
+pairs_data<-tidy_table%>%dplyr::select(FinancialSecurity,tv,intrnet,socmed,charit,excer,sportfan,commun,envichoi,gender,age,Cat_Hhincome,marstatus)
+ggpairs(pairs_data)
+```
+
++ Interesting correlations finding:
+++ there's a positive relationship between age and value of Financial security , time on TV  as well as money on charity, but negative relationship with that to community connected and time on exercise and sport
++ there's strong relationship with time spent TV and Internet
+++ the attitude towards commnity, environment and sportsfans is positive correlative
+
+From these graphs, it’s unclear which targets should be made and how the marketing should be positioned, I will research this further in the detailed EDA.
+```{r message = FALSE}
+# Boxplots of Finacialsecurity by gender, marital status, householdincome and education
+grid.arrange(
+  # Finacialsecurity by gender
+   tidy_table %>%
+    ggplot(aes(x = gender, y = FinancialSecurity)) +
+    geom_boxplot() +
+    coord_flip(),
+  # Finacialsecurity by marital status
+   tidy_table %>%
+    ggplot(aes(x = marstatus, y = FinancialSecurity)) +
+    geom_boxplot() +
+    coord_flip(),
+   # Finacialsecurity by Hhincome
+   tidy_table %>%
+    ggplot(aes(x = Cat_Hhincome, y = FinancialSecurity)) +
+    geom_boxplot() +
+    coord_flip(),
+    # Finacialsecurity by Education
+   tidy_table %>%
+    ggplot(aes(x = educ, y = FinancialSecurity)) +
+    geom_boxplot() +
+    coord_flip(),
+  ncol = 2
+)
+
+```
+
++ finding from the graph:
+++ widowed value FinancialSecuriy most
+
+# Detailed and Statistical EDA
+For this section of the exploration, we examine the statistical validity of the most interesting findings discussed in the basic EDA.
+
+Question1: Is the participation of the retirement plan related to the higher value of Financial Security?
+```{r}
+g1 <- tidy_table %>% 
+  group_by(Cat_Fin,Cat_retirement) %>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = Cat_Fin, y = count, fill = Cat_retirement)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "retirement plan", y = "Percentage") +
+    coord_flip() +
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "top", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_fill_brewer(palette = "Blues") +
+     ggtitle("Retirement Plan Distribution By value of Financial Security\nTarget at the people with high value of Financial Security")
+
+g1
+```
+
++ the people with higher value in Financial Security would be more likely to join the plan
+
+Question2: Is the participation of the retirement plan related to the marital status?
+```{r}
+# remove  "other" information in marital status
+
+g2 <- tidy_table %>%filter(marstatus!="Other"&gender=="Female")%>%
+  group_by(marstatus,Cat_retirement) %>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = marstatus, y = count, fill = Cat_retirement)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "retirement plan",y = "Percentage") +
+    coord_flip() +
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "top", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_fill_brewer(palette = "Blues") +
+  ggtitle("Retirement Plan Distribution By Marital Status",
+          subtitle = "Target at the people for widowed or married people")
+
+g2
+```
+
++ the married, Divoced and widowed people  share high likelihood to join the plan
+
+
+Question3: Is the participation of the retirement plan related to age?
+
+```{r}
+g3 <-
+  tidy_table %>% 
+  group_by(Cat_age, Cat_retirement) %>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = Cat_age, y = count, fill = Cat_retirement)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "retirement plan", y = "Percentage") +
+    coord_flip() +
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "top", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_x_discrete(limits=c("<20","20s",">=70","40s","30s","60s","50s")) +
+    scale_fill_brewer(palette = "Blues") +
+    ggtitle("Retirement Plan Distribution By Age\nTarget at people in 50s and 60s")
+
+g3
+```
+
++ it's not surprising that  50s to 60s people are more likely to join/remain in the retirement plan, since the 66 is the full retirement age, if people withdraw before that age may face high reductions of tax, and 71 is the impative age to withdraw the retirment plan.
+
+Question4: Is the participation of the retirement plan related to age?
+
+```{r}
+g4 <-
+  tidy_table %>% 
+  group_by(educ, Cat_retirement,gender) %>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = educ, y = count, fill = Cat_retirement)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "retirement plan", y = "Percentage") +
+    coord_flip() +
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "top", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_fill_brewer(palette = "Blues") +
+    ggtitle("Retirement Plan Distribution By Education",
+          subtitle = "higher edcuation maybe more likely to join the plan")
+
+g4
+```
+
++ even it seems more likely to join the plan with higher education, but there are missing information for others
+
+
+
+Question5: How Value of Financial Security differentiated by age?
+
+```{r}
+g5 <-tidy_table %>% 
+  group_by(Cat_age, Cat_Fin) %>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = Cat_age, y = count, fill =Cat_Fin)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "Value", y = "Percentage") +
+    coord_flip() +
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "top", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_fill_brewer(palette = "Blues") +
+    scale_x_discrete(limits=c("<20",">=70","20s","30s","40s","60s","50s")) +
+    ggtitle("Value of Financial Security By Age\n 50s is a good target - more than 98% think it important")
+g5
+```
+
++ people at 50s value Financial Security Most
+
+
+Question6: How Value of Financial Security differentiated by marital status?
+```{r}
+g6 <-tidy_table %>% 
+  group_by(marstatus, Cat_Fin) %>%filter(marstatus!="Other")%>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = marstatus, y = count, fill =Cat_Fin)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "Value", y = "Percentage") +
+    
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "right", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_fill_brewer(palette = "Blues") +
+    ggtitle("Value of Financial Security By Marital Status\nwidowed peopleis a good target- most of them think it extrem or very important")+
+    scale_x_discrete(limits=c("Widowed","Divorced","Married","single","Partnered")) 
+
+g6
+
+```
+
++ Most widowed people value Financial Security extrem or very imporance
+
+
+Question7: How Value of Financial Security differentiated by household income?
+```{r}
+g7 <-tidy_table %>% 
+  group_by(Cat_Hhincome, Cat_Fin) %>%
+  summarise(count= n()) %>%
+  ggplot(aes(x = Cat_Hhincome, y = count, fill =Cat_Fin)) +
+    geom_bar(stat = "identity", position = "fill") + 
+    labs(fill = "Value", y = "Percentage") +
+    coord_flip() +
+    scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+    theme_classic() +
+    guides(fill = guide_legend(reverse = TRUE)) +
+    theme(legend.position = "right", 
+          legend.justification = "center",
+          legend.title = element_text(face = "bold"),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.line.y = element_blank()) +
+    scale_fill_brewer(palette = "Blues") +
+    ggtitle("Value of Financial Security By Household Income",
+          subtitle = "Most widowed people value Financial Security extrem or very imporance")
+
+g7
+
+```
+
++ people at from Middle class value Financial Security Most
+
+
+Question8: how participation of the retirement plan related to both the Householdincome and marital status?
+```{r}
+
+g8 <- tidy_table %>%  filter(marstatus!="Other") %>% 
+group_by(Cat_Hhincome,marstatus,Cat_retirement) %>%
+   summarise(count = n()) %>% 
+  ggplot(aes(x = marstatus, y = count, fill=Cat_retirement)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_classic() +
+   coord_flip() +
+  labs(fill = "Retirement Plan",y="count") +
+  theme(axis.text = element_text(face = "bold", size = 9),
+        axis.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.line.x = element_blank(),
+        legend.position = "right",
+        legend.title = element_text(face = "bold")) +
+  ggtitle("participation of the retirement plan by household income and marital status\n married people with Middlehousehold income is a large potential ") +
+    scale_fill_brewer() +
+    facet_grid(Cat_Hhincome ~ .)
+  
+g8
+
+```
+
++ so the married people with middle householdincome is our target, this segment have most populations and and large retirement participation rate
+
+
+Question9: Is the participation of the retirement plan related to both the age and marital status?
+```{r}
+
+g9 <- tidy_table %>%  filter(Cat_age!="<20",marstatus!="Other") %>% 
+group_by(Cat_age,marstatus,Cat_retirement) %>%
+   summarise(count = n()) %>% 
+    mutate(total = sum(count)) %>% 
+    mutate(percent = count/total) %>% 
+  ggplot(aes(x = marstatus, y = percent, fill=Cat_retirement)) +
+  geom_bar(stat = "identity", position = "fill") +
+  theme_classic() +
+   coord_flip() +
+  labs(fill = "Retirement Plan") +
+      scale_y_continuous(labels = percent_format(accuracy = 1, suffix = "%")) +
+  theme(axis.text = element_text(face = "bold", size = 9),
+        axis.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.line.x = element_blank(),
+        legend.position = "top",
+        legend.title = element_text(face = "bold")) +
+  ggtitle("participation of the retirement plan by age and marital status",
+          subtitle = "100% participation for 50s,60s widowed & 30s,70s divorced people") +
+    scale_fill_brewer() +
+   facet_wrap(.~ Cat_age) 
+  
+g9
+```
+
+
++ people at 50s,60s widowed & 40s,70s divorced people participate the retirement plan with 100%
++ so the divorced people in 30s,70s and widowed people in 50s,60s our target customer
+
+# Statistic analysis
+```{r}
+# remove age under 20, because 21 is the leagal age to join retirement plan
+z <- qnorm(.95)
+q_g1 <- tidy_table %>% 
+group_by(marstatus, Cat_retirement) %>%
+  summarise(Fina = mean(FinancialSecurity), sd = sd(FinancialSecurity), 
+            n = n(), ci = z * sd/sqrt(n)) %>%
+  ggplot(aes(x = marstatus, y = Fina, fill = Cat_retirement)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  geom_errorbar(aes(ymin = Fina - ci, ymax = Fina + ci), 
+                width = 0.5, position = position_dodge(0.9)) +
+  theme_classic() +
+  labs(fill = "Retirement Plan") +
+  theme(axis.text = element_text(face = "bold", size = 11),
+        axis.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        legend.position = "top",
+        legend.title = element_text(face = "bold")) +
+  scale_fill_brewer() +
+  ggtitle("Average Financial Security by Marital Status and Retirement Plan Participation",
+          subtitle = "95% Confidence Interval ")
+
+q_g1
+```
+
++ 95% Confidence Interval of Expcted Financial Security Conditional on Marital Status and Retirement Plan Participation
+
+```{r}
+# remove age under 20, because 21 is the leagal age to join retirement plan
+z <- qnorm(.95)
+q_g2 <- tidy_table %>% filter(Cat_age!="<20") %>% 
+group_by(Cat_age, Cat_retirement) %>%
+  summarise(Fina = mean(FinancialSecurity), sd = sd(FinancialSecurity), 
+            n = n(), ci = z * sd/sqrt(n)) %>%
+  ggplot(aes(x = Cat_age, y = Fina, fill = Cat_retirement)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  geom_errorbar(aes(ymin = Fina - ci, ymax = Fina + ci), 
+                width = 0.5, position = position_dodge(0.9)) +
+  theme_classic() +
+  labs(fill = "Retirement Plan") +
+  theme(axis.text = element_text(face = "bold", size = 11),
+        axis.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.line.x = element_line(colour = "grey"),
+        legend.position = "top",
+        legend.title = element_text(face = "bold")) +
+  scale_fill_brewer() +
+  ggtitle("Average Financial Security by Age and Retirement Plan Participation",
+          subtitle = "95% Confidence Interval ")
+
+q_g2
+```
+
++ 95% Confidence Interval of Expcted Financial Security Conditional on Age and Retirement Plan Participation
+
+Logit model and calculate odd ratios 
+
+```{r}
+tidy_table <- tidy_table %>% mutate(Part_Retirement = case_when(Cat_retirement == "NO" ~ "0" , TRUE~ "1"), Part_Retirement =as.numeric(Part_Retirement ))
+
+# Logtit model
+ Logit <- glm( Part_Retirement ~ Cat_Fin+Cat_age+jobstatus+Hhincome+marstatus, 
+               family = binomial(link = "logit"), 
+                data = tidy_table)
+summary(Logit)
+
+# calculate odd ratios
+logitor(Part_Retirement ~ Cat_Fin+Cat_age+jobstatus+Hhincome+marstatus,data = tidy_table)
+```
+
+Indeed, here I find statistical confirmation of some of the visual exploration.
+
+For the age category, at the 1% significance level, the estimated odds of participating the financial retirement plan for people in 50s and 60s is 38.31 and 39.1 times higher compared to the group under 20s. 
+For the Household income category, it indicate that the lower the income, the less likely a person would join the retirement plan, the estimated odds of participating the plan for people with HhincomeBelow 20,000 is 88.6% lower than that of the people with HhincomeBelow over 200,000.
+For the Marital Status, it shows that the estimated odds for Widowed person to partipate the plan is 1.7 times higher than the divorced one, however, this result is not statistically significant at 10% level.
+
+
+
+# Findings and Recommendations 
+
++ The binary response model shows that holding other variables constont, people with age of 50s and 60s have higher odds of participating in retirement plan. The regression results also indicate that family with low household income have lower odds participation in retirement plan.
++ I identified the impacts of demographics and socioeconomic variables on demand for retirement plan and suggested that marketing campagin should target people with the following characteristics: high value of financial security, middle income, and those who are widowed or divorced.
+
+# Save File
+
+```{r}
+# Save the rds file so I can reuse anything from this file in another file
+save.image("Final_TA.RData")
+
+```
+
+
+
+
